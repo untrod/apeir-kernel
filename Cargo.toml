@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nous-types",
+    "crates/nous-state",
+    "crates/nous-resource",
+    "crates/nous-security",
+    "crates/nous-nki",
+    "crates/nous-scheduler",
+    "crates/nous-execution-proof",
+    "crates/nous-runtime-client",
+    "crates/nous-intelligence",
+    "crates/nous-control-plane",
+    "crates/nous-kernel-core",
+    "daemon/nousd",
+    "providers/worker",
+    "tools/nous",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["APEIR Kernel maintainers"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+ed25519-dalek = "2"
+sha2 = "0.10"
+async-trait = "0.1"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+proptest = "1"
+tempfile = "3"
+
+nous-types = { path = "crates/nous-types" }
+nous-state = { path = "crates/nous-state" }
+nous-resource = { path = "crates/nous-resource" }
+nous-security = { path = "crates/nous-security" }
+nous-nki = { path = "crates/nous-nki" }
+nous-scheduler = { path = "crates/nous-scheduler" }
+nous-execution-proof = { path = "crates/nous-execution-proof" }
+nous-runtime-client = { path = "crates/nous-runtime-client" }
+nous-intelligence = { path = "crates/nous-intelligence" }
+nous-control-plane = { path = "crates/nous-control-plane" }
+nous-kernel-core = { path = "crates/nous-kernel-core" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

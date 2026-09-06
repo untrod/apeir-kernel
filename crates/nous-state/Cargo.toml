@@ -1,0 +1,21 @@
+[package]
+name = "nous-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Append-only state journal with CAS transitions and crash recovery for the APEIR AI Kernel"
+
+[dependencies]
+nous-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "nous-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Security kernel — authentication, capability grants, default-deny, isolation"
+
+[dependencies]
+nous-types.workspace = true
+chrono.workspace = true
+uuid.workspace = true

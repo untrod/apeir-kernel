@@ -1,0 +1,74 @@
+name: APEIR Kernel CI
+
+on:
+  push:
+    branches: [main, 'kernel/*', 'feature/*', 'fix/*', 'release/*']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust kernel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Compile every target
+        run: cargo check --workspace --all-targets --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --workspace --locked
+      - name: Build canonical and compatibility executables
+        run: cargo build --locked -p nousd --bin apeird --bin nousd -p nous-cli --bin apeir-kernelctl --bin nous -p nous-provider-worker --bin nous-provider-worker
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Process boundary regression tests
+        run: python tests/e2e/kernel_e2e.py
+
+  contracts:
+    name: Contracts and SDK
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Architecture boundary audit
+        run: python scripts/architecture_check.py
+      - name: Local documentation links
+        run: python scripts/check_markdown_links.py
+      - name: Documentation checker tests
+        run: python tests/test_check_markdown_links.py -v
+      - name: Release manifest tests
+        run: python tests/test_release_manifest.py -v
+      - name: Source candidate export tests
+        run: python tests/test_source_candidate.py -v
+      - name: Security, dependency-license, and SBOM audit
+        run: python scripts/release_audit.py --output target/release-audit
+      - name: Python SDK tests
+        env:
+          PYTHONPATH: sdk/python/src
+        run: python -m unittest discover -s sdk/python/tests -v
+      - name: Protocol and brand contracts are present
+        run: >-
+          python -c "import json, pathlib;
+          root=pathlib.Path('.');
+          brand=json.loads((root/'spec/compatibility/apeir-brand-transition-v1.json').read_text());
+          assert brand['brand']['canonical']=='APEIR';
+          assert 'nous.*.v1' in brand['compatibility']['preserve_protocol_prefixes'];
+          assert (root/'spec/open-runtime/v1/capability.schema.json').is_file()"

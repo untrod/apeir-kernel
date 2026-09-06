@@ -1,0 +1,34 @@
+schema_version: 1
+id: reference-linear-v1
+name: Deterministic linear model
+kind: mathematical
+version: 1.0.0
+capabilities:
+  - mathematics.evaluate
+input_schema:
+  type: object
+  required: [operation, coefficients, input]
+output_schema:
+  type: object
+  required: [operation, result]
+backend:
+  kind: reference-math
+  entrypoint: ""
+  runtime: native
+resource_requirements: {}
+deployment:
+  mode: process
+  target: local
+  replicas: 1
+evaluation:
+  dataset: examples/open-runtime/mathematics/cases.json
+  metrics: [exact_match]
+  thresholds:
+    exact_match: 1.0
+artifacts: []
+provenance:
+  source: APEIR reference implementation
+compatibility:
+  nous_contracts: v1
+security:
+  network: denied

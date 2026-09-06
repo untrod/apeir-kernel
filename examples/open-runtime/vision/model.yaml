@@ -1,0 +1,33 @@
+schema_version: 1
+id: yolo-onnx-user-supplied-v1
+name: YOLO ONNX object detector
+kind: vision
+version: 1.0.0
+capabilities:
+  - vision.detect
+input_schema:
+  type: object
+  required: [image]
+output_schema:
+  type: object
+  required: [detections]
+backend:
+  kind: onnx
+  entrypoint: providers/yolo-onnx/provider.py
+  runtime: python
+resource_requirements: {}
+deployment:
+  mode: process
+  target: local
+  replicas: 1
+evaluation:
+  dataset: ""
+  metrics: [map50]
+  thresholds: {}
+artifacts: []
+provenance:
+  weights: user-supplied; not distributed by APEIR
+compatibility:
+  nous_contracts: v1
+security:
+  network: denied-after-install

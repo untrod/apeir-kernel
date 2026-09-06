@@ -1,0 +1,13 @@
+# Third-party notices
+
+APEIR Kernel source code is licensed under Apache-2.0. Rust dependency names and exact
+versions are recorded in `Cargo.lock`; Python requirements are recorded in
+`sdk/python/pyproject.toml` and optional validation scripts.
+
+This repository does not distribute model weights or datasets. The YOLO example
+is declarative and requires independently obtained, license-reviewed weights.
+ONNX and Ollama validation evidence does not redistribute their binaries.
+
+Redistributors must review and preserve the licenses of dependencies and any
+assets they add. The release evidence records the dependency-license audit for
+the candidate revision.

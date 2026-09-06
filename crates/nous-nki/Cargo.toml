@@ -1,0 +1,18 @@
+[package]
+name = "nous-nki"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NKI v1 protocol definitions and transport layer"
+
+[dependencies]
+nous-types.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio.workspace = true

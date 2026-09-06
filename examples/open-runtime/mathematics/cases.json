@@ -1,0 +1,10 @@
+[
+  {
+    "input": {"operation": "linear", "coefficients": [2, 3], "input": [4, 5], "bias": 1},
+    "expected": {"operation": "linear", "result": 24.0}
+  },
+  {
+    "input": {"operation": "polynomial", "coefficients": [1, 2, 3], "input": 2},
+    "expected": {"operation": "polynomial", "result": 17.0}
+  }
+]

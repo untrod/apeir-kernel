@@ -1,0 +1,64 @@
+schema_version: 1
+model:
+  schema_version: 1
+  id: reference-linear-v1
+  name: Deterministic linear model
+  kind: mathematical
+  version: 1.0.0
+  capabilities:
+    - mathematics.evaluate
+  input_schema:
+    type: object
+  output_schema:
+    type: object
+  backend:
+    kind: reference-math
+    entrypoint: ""
+    runtime: native
+  resource_requirements: {}
+  deployment:
+    mode: process
+    target: local
+    replicas: 1
+  evaluation:
+    dataset: reference-cases
+    metrics:
+      - exact_match
+    thresholds:
+      exact_match: 1.0
+  artifacts: []
+  provenance:
+    source: APEIR reference implementation
+  compatibility:
+    nous_contracts: v1
+  security:
+    network: denied
+architecture:
+  architecture_id: linear-function
+  layers: 1
+  hidden_dimension: 0
+  attention: ""
+  activation: identity
+  tokenizer_digest: ""
+  tensor_shapes_digest: scalar-coefficients-v1
+extension:
+  type: mathematical
+  solver: direct
+  variables:
+    - x
+  parameters:
+    slope: 2.0
+    intercept: 1.0
+  initial_conditions: {}
+  tolerance: 1.0e-12
+license:
+  id: Apache-2.0
+  source: LICENSE
+  derivative_works: true
+  redistribution: true
+  commercial_use: true
+adapters: []
+quantization: ""
+dataset_lineage:
+  - reference-cases@1.0.0
+status: validated

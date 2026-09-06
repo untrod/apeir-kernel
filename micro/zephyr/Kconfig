@@ -1,0 +1,5 @@
+menuconfig NOUS_MICRO
+    bool "APEIR Micro execution runtime"
+    default n
+    help
+      Enables the fixed-memory APEIR Micro runtime and NMP v1 protocol.

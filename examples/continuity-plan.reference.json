@@ -1,0 +1,148 @@
+{
+  "workload_id": "reference-continuity-demo",
+  "process_identity": "reference-process-1",
+  "steps": [
+    {
+      "step_id": "step-1",
+      "requirements": {
+        "chat": true,
+        "tools": true,
+        "local_only": true
+      },
+      "allow_degraded": false,
+      "candidates": [
+        {
+          "request": {
+            "operation_id": "reference-continuity-step-1",
+            "workload_id": "reference-continuity-demo",
+            "step_id": "step-1",
+            "backend": "reference",
+            "model": "",
+            "endpoint": "",
+            "credential_env": "",
+            "input": "commit the first reference step",
+            "delivery": "IDEMPOTENT",
+            "snapshot": {
+              "model_revision": "none",
+              "provider_revision": "reference-a-v1",
+              "prompt_revision": "prompt-v1",
+              "tool_revision": "none",
+              "knowledge_revision": "state-v1",
+              "policy_revision": "deterministic-v1",
+              "capability_revision": "reference-v1",
+              "context_revision": "context-v1"
+            },
+            "timeout_ms": 5000
+          },
+          "capabilities": {
+            "schema_version": 1,
+            "provider": "reference-a",
+            "backend": "reference",
+            "model": "",
+            "runtime_class": "reference",
+            "chat": "SUPPORTED",
+            "streaming": "UNSUPPORTED",
+            "tools": "SUPPORTED",
+            "structured_output": "SUPPORTED",
+            "vision": "UNSUPPORTED",
+            "reasoning": "SUPPORTED",
+            "context_length": 32768,
+            "privacy_local": true,
+            "probed_at_us": 0
+          }
+        }
+      ]
+    },
+    {
+      "step_id": "step-2",
+      "requirements": {
+        "chat": true,
+        "tools": true,
+        "local_only": true
+      },
+      "allow_degraded": false,
+      "candidates": [
+        {
+          "request": {
+            "operation_id": "reference-continuity-step-2",
+            "workload_id": "reference-continuity-demo",
+            "step_id": "step-2",
+            "backend": "reference-crash",
+            "model": "",
+            "endpoint": "",
+            "credential_env": "",
+            "input": "continue after provider loss",
+            "delivery": "IDEMPOTENT",
+            "snapshot": {
+              "model_revision": "none",
+              "provider_revision": "reference-a-v1",
+              "prompt_revision": "prompt-v1",
+              "tool_revision": "none",
+              "knowledge_revision": "state-v1",
+              "policy_revision": "deterministic-v1",
+              "capability_revision": "reference-v1",
+              "context_revision": "context-v1"
+            },
+            "timeout_ms": 5000
+          },
+          "capabilities": {
+            "schema_version": 1,
+            "provider": "reference-a",
+            "backend": "reference-crash",
+            "model": "",
+            "runtime_class": "reference",
+            "chat": "SUPPORTED",
+            "streaming": "UNSUPPORTED",
+            "tools": "SUPPORTED",
+            "structured_output": "SUPPORTED",
+            "vision": "UNSUPPORTED",
+            "reasoning": "SUPPORTED",
+            "context_length": 32768,
+            "privacy_local": true,
+            "probed_at_us": 0
+          }
+        },
+        {
+          "request": {
+            "operation_id": "reference-continuity-step-2",
+            "workload_id": "reference-continuity-demo",
+            "step_id": "step-2",
+            "backend": "reference",
+            "model": "",
+            "endpoint": "",
+            "credential_env": "",
+            "input": "continue after provider loss",
+            "delivery": "IDEMPOTENT",
+            "snapshot": {
+              "model_revision": "none",
+              "provider_revision": "reference-b-v1",
+              "prompt_revision": "prompt-v1",
+              "tool_revision": "none",
+              "knowledge_revision": "state-v1",
+              "policy_revision": "deterministic-v1",
+              "capability_revision": "reference-v1",
+              "context_revision": "context-v1"
+            },
+            "timeout_ms": 5000
+          },
+          "capabilities": {
+            "schema_version": 1,
+            "provider": "reference-b",
+            "backend": "reference",
+            "model": "",
+            "runtime_class": "reference",
+            "chat": "SUPPORTED",
+            "streaming": "UNSUPPORTED",
+            "tools": "SUPPORTED",
+            "structured_output": "SUPPORTED",
+            "vision": "UNSUPPORTED",
+            "reasoning": "SUPPORTED",
+            "context_length": 32768,
+            "privacy_local": true,
+            "probed_at_us": 0
+          }
+        }
+      ]
+    }
+  ]
+}

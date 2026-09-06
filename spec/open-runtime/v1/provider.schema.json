@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nous.dev/schemas/open-runtime/v1/provider.schema.json",
+  "title": "ProviderManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "version", "backend"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "backend": {"type": "string", "minLength": 1},
+    "runtime_class": {"type": "string"},
+    "entrypoint": {"type": "string"},
+    "model": {"type": "string"},
+    "endpoint": {"type": "string"},
+    "credential_env": {"type": "string", "pattern": "^$|^[A-Za-z_][A-Za-z0-9_]*$"},
+    "capabilities": {"type": "array", "items": {"type": "string"}},
+    "lifecycle": {"type": "array", "items": {"type": "string"}},
+    "metadata": {"type": "object", "additionalProperties": {"type": "string"}}
+  }
+}

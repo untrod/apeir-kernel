@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nous.dev/schemas/open-runtime/v1/model.schema.json",
+  "title": "ModelSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "name", "kind", "version", "capabilities", "backend"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["foundation", "vision", "speech", "embedding", "mathematical", "statistical", "optimization", "control", "simulation", "analytical", "custom"]},
+    "version": {"type": "string", "minLength": 1},
+    "capabilities": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "input_schema": {},
+    "output_schema": {},
+    "backend": {"type": "object"},
+    "resource_requirements": {"type": "object"},
+    "deployment": {"type": "object"},
+    "evaluation": {"type": "object"},
+    "artifacts": {"type": "array"},
+    "provenance": {"type": "object"},
+    "compatibility": {"type": "object"},
+    "security": {"type": "object"}
+  }
+}

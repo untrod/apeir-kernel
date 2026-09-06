@@ -1,0 +1,16 @@
+[package]
+name = "nous-resource"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Resource admission control, lease management, and resource domain hierarchy"
+
+[dependencies]
+nous-types.workspace = true
+nous-state.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio.workspace = true

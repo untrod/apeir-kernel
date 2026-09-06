@@ -1,0 +1,6 @@
+{
+  "operation": "linear",
+  "coefficients": [2, 3],
+  "input": [4, 5],
+  "bias": 1
+}

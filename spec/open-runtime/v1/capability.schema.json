@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nous.dev/schemas/open-runtime/v1/capability.schema.json",
+  "title": "CapabilityContract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "version"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z0-9_-]+(\\.[a-z0-9_-]+)+$"},
+    "version": {"type": "string", "minLength": 1},
+    "input_schema": {},
+    "output_schema": {},
+    "constraints": {"type": "object"},
+    "requirements": {"type": "object"},
+    "metadata": {"type": "object", "additionalProperties": {"type": "string"}}
+  }
+}

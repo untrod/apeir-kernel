@@ -1,0 +1,25 @@
+schema_version: 1
+id: intelligence-platform-reference
+name: Intelligence Platform reference
+version: 0.1.0
+description: Minimal project using Model, Graph, Dataset and Experiment contracts
+license: Apache-2.0
+models:
+  - id: reference-linear-v1
+    path: models/linear.profile.yaml
+algorithms: []
+datasets:
+  - id: reference-cases
+    path: datasets/reference.dataset.yaml
+providers: []
+workflows:
+  - id: math-pipeline
+    path: workflows/math.graph.yaml
+policies: []
+experiments:
+  - id: math-baseline
+    path: experiments/baseline.experiment.yaml
+deployments: []
+secret_refs: {}
+metadata:
+  maturity: reference

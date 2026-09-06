@@ -1,0 +1,17 @@
+[package]
+name = "nous-execution-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canonical actions, approval binding, execution receipts, and workload certificates"
+
+[dependencies]
+nous-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true

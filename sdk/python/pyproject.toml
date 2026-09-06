@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nous-kernel-sdk"
+version = "0.1.0"
+description = "Python NKI client for APEIR Kernel"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+[project.optional-dependencies]
+dev = ["ruff>=0.12,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

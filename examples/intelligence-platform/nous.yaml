@@ -1,0 +1,16 @@
+schema_version: 1
+name: intelligence-platform-reference
+version: 0.1.0
+description: Minimal APEIR intelligence engineering project
+models:
+  - models/linear.profile.yaml
+providers: []
+workflows:
+  - workflows/math.graph.yaml
+policies: []
+resources:
+  - datasets/reference.dataset.yaml
+  - experiments/baseline.experiment.yaml
+compatibility:
+  nous_contracts: v1
+license: Apache-2.0

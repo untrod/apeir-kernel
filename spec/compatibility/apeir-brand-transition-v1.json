@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "document": "apeir.brand-transition.v1",
+  "status": "accepted",
+  "accepted_at": "2026-09-05",
+  "brand": {
+    "canonical": "APEIR",
+    "previous": "Nous",
+    "display_zh_cn": "无限"
+  },
+  "projects": {
+    "kernel": "apeir-kernel",
+    "distribution": "apeir"
+  },
+  "commands": {
+    "apeird": ["nousd"],
+    "apeir-kernelctl": ["nous"],
+    "apeir": ["nous"],
+    "apeir-node": ["nous-node"],
+    "apeir-relay": ["nous-relay"]
+  },
+  "compatibility": {
+    "preserve_protocol_prefixes": ["nous.*.v1"],
+    "preserve_persisted_identifiers": true,
+    "preserve_signed_records": true,
+    "legacy_state_directory": ".nous",
+    "canonical_state_directory": ".apeir",
+    "legacy_environment_prefix": "NOUS_",
+    "canonical_environment_prefix": "APEIR_",
+    "protocol_v2_requires_explicit_migration": true
+  }
+}

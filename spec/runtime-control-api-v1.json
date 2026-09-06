@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "transport": "NKI v1",
+  "asset_kinds": [
+    "project",
+    "model",
+    "graph",
+    "dataset",
+    "experiment",
+    "artifact"
+  ],
+  "methods": {
+    "execution": [
+      "SubmitWorkload",
+      "GetWorkload",
+      "ListWorkloads",
+      "CancelWorkload"
+    ],
+    "catalog": [
+      "PutControlAsset",
+      "GetControlAsset",
+      "ListControlAssets",
+      "DeleteControlAsset"
+    ]
+  },
+  "mutation_semantics": {
+    "create_generation": 1,
+    "identical_put": "idempotent",
+    "changed_put": "expected_generation required",
+    "delete": "expected_generation required"
+  },
+  "security": {
+    "embedded_credentials": "forbidden",
+    "credential_storage": "external reference only",
+    "transport_scope": "loopback only",
+    "local_session": "NOUS_NKI_TOKEN when configured"
+  }
+}

@@ -1,0 +1,45 @@
+schema_version: 1
+id: math-pipeline
+version: 1.0.0
+nodes:
+  - id: normalize
+    kind: preprocessor
+    reference: ""
+    capability: data.normalize
+    input_schema:
+      type: object
+    output_schema:
+      type: object
+    resources: {}
+    parameters: {}
+    side_effects:
+      - none
+    backend:
+      kind: native
+      provider: ""
+      entrypoint: reference-normalize
+      configuration: {}
+  - id: linear
+    kind: model
+    reference: reference-linear-v1
+    capability: mathematics.evaluate
+    input_schema:
+      type: object
+    output_schema:
+      type: object
+    resources:
+      cpu_cores_millis: 100
+      ram_bytes: 1048576
+    parameters: {}
+    side_effects:
+      - none
+    backend:
+      kind: native
+      provider: ""
+      entrypoint: reference-math
+      configuration: {}
+edges:
+  - from: normalize
+    to: linear
+metadata:
+  execution_authority: existing-runtime

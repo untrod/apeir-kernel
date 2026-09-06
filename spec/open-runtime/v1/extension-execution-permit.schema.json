@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtensionExecutionPermit v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["allowed", "operation_id", "actor", "extension_id", "content_digest", "authorization_receipt_id", "capability", "operation", "parameter_hash", "executor", "policy_version", "decision_reason", "issued_at_us", "permit_id"],
+  "properties": {
+    "allowed": {"const": true},
+    "operation_id": {"type": "string", "minLength": 1},
+    "actor": {"type": "string", "minLength": 1},
+    "extension_id": {"type": "string", "minLength": 1},
+    "content_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "authorization_receipt_id": {"type": "string", "minLength": 1},
+    "capability": {"type": "string", "minLength": 1},
+    "operation": {"type": "string", "minLength": 1},
+    "parameter_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "executor": {"type": "string"},
+    "policy_version": {"type": "string", "minLength": 1},
+    "decision_reason": {"type": "string", "minLength": 1},
+    "issued_at_us": {"type": "integer", "minimum": 1},
+    "permit_id": {"type": "string", "minLength": 1}
+  }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "nous-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line client for APEIR Kernel"
+
+[[bin]]
+name = "nous"
+path = "src/main.rs"
+
+[[bin]]
+name = "apeir-kernelctl"
+path = "src/bin/apeir-kernelctl.rs"
+
+[dependencies]
+chrono.workspace = true
+nous-intelligence.workspace = true
+nous-nki.workspace = true
+nous-runtime-client.workspace = true
+nous-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

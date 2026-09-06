@@ -1,0 +1,18 @@
+schema_version: 1
+id: math-baseline
+version: 1.0.0
+model: reference-linear-v1
+dataset: reference-cases@1.0.0
+code_revision: reference
+runtime_version: 0.1.0
+seed: 42
+status: completed
+parameters:
+  tolerance: 1.0e-12
+resources:
+  cpu_cores_millis: 100
+environment:
+  backend: reference-math
+metrics:
+  exact_match: 1.0
+artifacts: []

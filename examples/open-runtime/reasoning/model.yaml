@@ -1,0 +1,31 @@
+schema_version: 1
+id: openai-compatible-reasoning-v1
+name: OpenAI-compatible reasoning model
+kind: foundation
+version: 1.0.0
+capabilities:
+  - reasoning.generate
+input_schema:
+  type: string
+output_schema:
+  type: string
+backend:
+  kind: openai-compatible
+  entrypoint: ""
+  runtime: remote
+resource_requirements: {}
+deployment:
+  mode: remote
+  target: provider-managed
+  replicas: 0
+evaluation:
+  dataset: ""
+  metrics: []
+  thresholds: {}
+artifacts: []
+provenance:
+  source: user-configured provider
+compatibility:
+  nous_contracts: v1
+security:
+  credential: environment-reference-only

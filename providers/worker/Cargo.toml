@@ -1,0 +1,18 @@
+[package]
+name = "nous-provider-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Independent provider worker process"
+
+[[bin]]
+name = "nous-provider-worker"
+path = "src/main.rs"
+
+[dependencies]
+nous-kernel-core.workspace = true
+nous-types.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+tokio.workspace = true

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtensionRevocationRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "extension_id", "content_digest", "authorization_receipt_id", "reason"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "extension_id": {"type": "string", "minLength": 1},
+    "content_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "authorization_receipt_id": {"type": "string", "minLength": 1},
+    "reason": {"type": "string"}
+  }
+}
