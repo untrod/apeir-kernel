@@ -36,9 +36,9 @@ impl NkiConnection {
                     e
                 ))
             })?;
-            return Ok(Self {
+            Ok(Self {
                 stream: Box::new(stream),
-            });
+            })
         }
         #[cfg(not(unix))]
         {
