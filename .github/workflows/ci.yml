@@ -32,6 +32,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit and integration tests
         run: cargo test --workspace --locked
+      - name: Reality service and crash fault injection
+        run: cargo test -p nous-kernel-core --features fault-injection --test reality_service --locked
       - name: Build canonical and compatibility executables
         run: cargo build --locked -p nousd --bin apeird --bin nousd -p nous-cli --bin apeir-kernelctl --bin nous -p nous-provider-worker --bin nous-provider-worker
       - uses: actions/setup-python@v5
