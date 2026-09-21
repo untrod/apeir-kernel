@@ -37,7 +37,7 @@ impl ServiceProcess {
         .unwrap();
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/service_health.py");
-        let child = Command::new("python")
+        let mut child = Command::new("python")
             .arg(fixture)
             .arg(port.to_string())
             .arg(mode)
@@ -52,6 +52,8 @@ impl ServiceProcess {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        let _ = child.kill();
+        let _ = child.wait();
         panic!("service fixture did not start");
     }
 }
