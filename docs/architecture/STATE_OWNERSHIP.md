@@ -8,6 +8,8 @@ views. A restart may rebuild them; they must not become a second durable truth.
 | --- | --- | --- | --- |
 | Workload and operation lifecycle | Execution core | `Workload` and `Operation` entries | `KernelRuntime` |
 | Provider result | Execution core | `OperationReceipt` and `StepCommit` | `DurableExecutor` |
+| Reality observation | Execution core | `ObservedEffect` with evidence references and digest | authorized `RealityObserver` through `DurableExecutor` |
+| Reality verification | Execution core | `EffectVerification` bound to contract and observation digests | authorized `RealityVerifier` through `DurableExecutor` |
 | Scheduling decision | Scheduler core | `SchedulerDecision` | `SchedulerCore` |
 | Resource lease | Resource core | `ResourceLease` | `LeaseManager` through `KernelRuntime` |
 | Effect transaction | Effect core | intent, receipt, and commit | effect authority |
@@ -23,3 +25,7 @@ views. A restart may rebuild them; they must not become a second durable truth.
 3. Derived state is fail-closed when its synchronization primitive is poisoned.
 4. Recovery revokes orphaned leases before granting a new fenced lease.
 5. The effect transaction table and idempotency index share one atomic lock.
+6. Provider success is never promoted to reality success. Only a bound
+   `EffectVerification(MATCH)` authorizes a reality-effect commit.
+7. Large evidence remains in Artifact Runtime. The journal owns only immutable
+   references, digests, identities, policy revisions, and verification facts.

@@ -13,6 +13,9 @@ nous / Rust SDK / Python SDK
   -> durable operation intent
   -> isolated provider process
   -> durable provider receipt
+  -> optional EffectContract reality path:
+       authorized observation -> evidence binding -> verification
+       -> MATCH only
   -> durable step commit and workload terminal state
   -> lease release
   -> NKI result
@@ -32,10 +35,13 @@ kernel memory.
   does not retry an operation automatically.
 - Provider runtime owns transport timeout and child termination. It does not
   retry the operation.
-- Execution recovery may re-enter only `IDEMPOTENT` or `RECONCILABLE`
-  operations.
-- A recorded receipt without a commit is committed without calling the
-  provider again.
+- Execution recovery re-executes only `IDEMPOTENT` operations. Reconcilable
+  operations resume observation/reconciliation; they are not blind retries.
+- A recorded provider receipt without a commit never calls the provider again.
+  Legacy requests commit the existing receipt; reality-contract requests
+  resume observation and verification.
+- `MATCH` is the only Reality Verification result that permits commit.
+- `PARTIAL`, `MISMATCH`, and `UNKNOWN` fail closed.
 - An observed provider failure is durably aborted and is not re-executed on
   daemon restart. A later explicit Rebind creates a new recoverable intent for
   the same logical operation.
