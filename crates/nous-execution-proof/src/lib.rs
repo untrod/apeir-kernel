@@ -27,6 +27,7 @@ pub mod transaction;
 
 pub use transaction::{EffectTransaction, EffectTransactionPhase, TransactionalEffectEngine};
 
+use nous_types::{EffectContract, EffectVerification, ObservedEffect};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -74,6 +75,21 @@ pub struct CanonicalAction {
 
     /// The actual effect receipt (populated after execution).
     pub effect_receipt: Option<EffectReceipt>,
+
+    /// Independent observation of reality after provider execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_effect: Option<ObservedEffect>,
+
+    /// Receipt binding the approved expectation to the observed reality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_verification: Option<EffectVerification>,
+
+    /// A successful provider receipt alone never sets this flag.
+    #[serde(default)]
+    pub effect_committed: bool,
+
+    #[serde(default)]
+    pub recovery_involved: bool,
 
     /// Hash of all outputs (populated after execution).
     pub output_digest: Option<Sha256Digest>,
@@ -179,6 +195,9 @@ pub struct EffectIntent {
     pub expected_outcome: String,
     pub max_retries: u32,
     pub timeout_ms: u64,
+    /// Versioned reality contract. `None` preserves the v0.1 receipt-only path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<EffectContract>,
 }
 
 /// The actual effect receipt after execution.
@@ -260,6 +279,46 @@ pub fn verify_action(action: &CanonicalAction) -> VerificationResult {
                     action.effect_intent.expected_target, receipt.actual_target
                 )
             },
+        });
+    }
+
+    if let Some(contract) = &action.effect_intent.contract {
+        let observation_valid = action
+            .observed_effect
+            .as_ref()
+            .is_some_and(|observation| observation.validate(contract).is_ok());
+        checks.push(VerificationCheck {
+            check_name: "reality_observation_bound".into(),
+            passed: observation_valid,
+            detail: if observation_valid {
+                "Reality observation is bound to the effect contract and evidence".into()
+            } else {
+                "Reality observation is missing, mismatched, or tampered".into()
+            },
+        });
+        let verification_matches = action
+            .observed_effect
+            .as_ref()
+            .zip(action.effect_verification.as_ref())
+            .is_some_and(|(observation, verification)| {
+                verification.outcome == nous_types::VerificationOutcome::Match
+                    && verification
+                        .validate_bindings(contract, observation)
+                        .is_ok()
+            });
+        checks.push(VerificationCheck {
+            check_name: "reality_verification_match".into(),
+            passed: verification_matches,
+            detail: if verification_matches {
+                "Reality verification is a bound MATCH".into()
+            } else {
+                "Effect has no bound MATCH verification".into()
+            },
+        });
+        checks.push(VerificationCheck {
+            check_name: "effect_committed_after_verification".into(),
+            passed: verification_matches && action.effect_committed,
+            detail: format!("Effect committed: {}", action.effect_committed),
         });
     }
 
@@ -523,6 +582,7 @@ mod tests {
                 expected_outcome: "File written".into(),
                 max_retries: 1,
                 timeout_ms: 5000,
+                contract: None,
             },
             effect_receipt: Some(EffectReceipt {
                 receipt_id: "rec-1".into(),
@@ -536,6 +596,10 @@ mod tests {
                 executed_at: chrono::Utc::now(),
                 executed_by: "kernel".into(),
             }),
+            observed_effect: None,
+            effect_verification: None,
+            effect_committed: false,
+            recovery_involved: false,
             output_digest: None,
             causal_parent: None,
             replay_descriptor: ReplayDescriptor {
