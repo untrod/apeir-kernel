@@ -59,6 +59,7 @@ async fn run() -> Result<ProviderResponse, KernelError> {
                 output_digest: digest_bytes(result.as_bytes()),
                 snapshot_digest: digest_json(&request.snapshot)?,
                 provider_revision: request.snapshot.provider_revision.clone(),
+                executor_identity: None,
                 result,
                 completed_at_us: chrono::Utc::now().timestamp_micros(),
             };

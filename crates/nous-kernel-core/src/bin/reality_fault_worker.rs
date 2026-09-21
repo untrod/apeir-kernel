@@ -36,6 +36,7 @@ impl Provider for CounterProvider {
             output_digest: digest_bytes(b"exit=0"),
             snapshot_digest: digest_json(&request.snapshot)?,
             provider_revision: request.snapshot.provider_revision.clone(),
+            executor_identity: None,
             result: "exit=0".into(),
             completed_at_us: chrono::Utc::now().timestamp_micros(),
         })

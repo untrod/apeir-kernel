@@ -963,6 +963,7 @@ mod tests {
                 output_digest: crate::digest_bytes(request.backend.as_bytes()),
                 snapshot_digest: crate::digest_json(&request.snapshot)?,
                 provider_revision: request.snapshot.provider_revision.clone(),
+                executor_identity: None,
                 result: request.backend.clone(),
                 completed_at_us: chrono::Utc::now().timestamp_micros(),
             })

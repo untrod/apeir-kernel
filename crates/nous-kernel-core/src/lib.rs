@@ -57,6 +57,8 @@ pub struct OperationReceipt {
     pub output_digest: String,
     pub snapshot_digest: String,
     pub provider_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_identity: Option<String>,
     pub result: String,
     pub completed_at_us: i64,
 }
@@ -168,6 +170,12 @@ pub struct VerificationDecision {
 pub trait RealityObserver: Send + Sync {
     fn identity(&self) -> RealityIdentity;
 
+    /// Reject contracts outside this observer's configured scope before any
+    /// provider side effect is attempted.
+    fn admit_contract(&self, _contract: &EffectContract) -> Result<(), KernelError> {
+        Ok(())
+    }
+
     async fn observe(
         &self,
         contract: &EffectContract,
@@ -200,6 +208,11 @@ struct RealityRuntime {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Kernel-owned executor identity, independent of the provider's result.
+    fn executor_identity(&self) -> String {
+        std::any::type_name::<Self>().to_owned()
+    }
+
     async fn execute(
         &self,
         request: &OperationRequest,
@@ -427,6 +440,7 @@ fn normalize_external_provider_response(
                     output_digest: digest_bytes(result.as_bytes()),
                     snapshot_digest: digest_json(&request.snapshot)?,
                     provider_revision: request.snapshot.provider_revision.clone(),
+                    executor_identity: None,
                     result,
                     completed_at_us: chrono::Utc::now().timestamp_micros(),
                 }),
@@ -481,6 +495,10 @@ fn normalize_external_provider_response(
 
 #[async_trait]
 impl Provider for ProcessProvider {
+    fn executor_identity(&self) -> String {
+        "apeir.process-provider".into()
+    }
+
     async fn execute(
         &self,
         request: &OperationRequest,
@@ -652,7 +670,10 @@ impl<P: Provider> DurableExecutor<P> {
             Some(receipt) => receipt,
             None => {
                 fault::trigger(FaultPoint::EffectBeforeExecute, &request.operation_id);
-                let receipt = self.provider.execute(request, cancellation).await?;
+                let mut receipt = self.provider.execute(request, cancellation).await?;
+                if request.effect_contract.is_some() {
+                    receipt.executor_identity = Some(self.provider.executor_identity());
+                }
                 fault::trigger(FaultPoint::EffectAfterExecute, &request.operation_id);
                 self.append(
                     request,
@@ -670,6 +691,11 @@ impl<P: Provider> DurableExecutor<P> {
             || receipt.input_digest != request.input_digest()
             || receipt.snapshot_digest != digest_json(&request.snapshot)?
             || receipt.provider_revision != request.snapshot.provider_revision
+            || (request.effect_contract.is_some()
+                && receipt
+                    .executor_identity
+                    .as_deref()
+                    .is_none_or(str::is_empty))
         {
             return Err(KernelError::UnsafeRecovery(request.operation_id.clone()));
         }
@@ -713,11 +739,19 @@ impl<P: Provider> DurableExecutor<P> {
                 .identity()
                 .validate()
                 .map_err(KernelError::RealityVerification)?;
+            reality.observer.admit_contract(contract)?;
             reality
                 .verifier
                 .identity()
                 .validate()
                 .map_err(KernelError::RealityVerification)?;
+            if contract.verification == VerificationMode::Independent
+                && reality.verifier.identity().identity == self.provider.executor_identity()
+            {
+                return Err(KernelError::RealityVerification(
+                    "independent verifier identity equals kernel-owned executor identity".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -809,7 +843,8 @@ impl<P: Provider> DurableExecutor<P> {
 
         let verifier = reality.verifier.identity();
         if contract.verification == VerificationMode::Independent
-            && verifier.identity == receipt.provider_revision
+            && (verifier.identity == receipt.provider_revision
+                || receipt.executor_identity.as_deref() == Some(verifier.identity.as_str()))
         {
             return Err(KernelError::RealityVerification(
                 "independent verifier identity equals provider executor identity".into(),
@@ -1140,6 +1175,7 @@ mod tests {
                 output_digest: digest_bytes(request.input.as_bytes()),
                 snapshot_digest: digest_json(&request.snapshot)?,
                 provider_revision: request.snapshot.provider_revision.clone(),
+                executor_identity: None,
                 result: request.input.clone(),
                 completed_at_us: chrono::Utc::now().timestamp_micros(),
             })
@@ -1265,6 +1301,7 @@ mod tests {
             output_digest: digest_bytes(request.input.as_bytes()),
             snapshot_digest: digest_json(&request.snapshot).unwrap(),
             provider_revision: request.snapshot.provider_revision.clone(),
+            executor_identity: None,
             result: "durable-result".into(),
             completed_at_us: 1,
         };
@@ -1350,6 +1387,7 @@ mod tests {
             output_digest: digest_bytes(request.input.as_bytes()),
             snapshot_digest: digest_json(&request.snapshot).unwrap(),
             provider_revision: request.snapshot.provider_revision.clone(),
+            executor_identity: Some(std::any::type_name::<DigestProvider>().into()),
             result: "provider-success".into(),
             completed_at_us: 1,
         };
@@ -1424,6 +1462,21 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry.object_type == "StepCommit"));
+    }
+
+    #[tokio::test]
+    async fn kernel_owned_executor_identity_rejects_same_verifier_before_execution() {
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let executor = reality_executor(
+            journal.clone(),
+            DigestProvider,
+            serde_json::json!({"http_status": 200, "version": "v2"}),
+            false,
+            std::any::type_name::<DigestProvider>(),
+        );
+        let error = executor.execute(&reality_request(200)).await.unwrap_err();
+        assert!(error.to_string().contains("kernel-owned executor identity"));
+        assert!(journal.read_workload("workload-1").unwrap().is_empty());
     }
 
     #[tokio::test]
