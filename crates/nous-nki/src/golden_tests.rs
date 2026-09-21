@@ -249,8 +249,8 @@ mod golden_vector_tests {
     // -- Version negotiation --
 
     #[test]
-    fn test_nki_version_is_2() {
-        assert_eq!(NKI_VERSION, 2, "NKI v1alpha2 uses protocol version 2");
+    fn test_nki_version_is_3() {
+        assert_eq!(NKI_VERSION, 3, "reality effects require protocol version 3");
     }
 
     #[test]
@@ -275,14 +275,18 @@ mod golden_vector_tests {
 
     #[test]
     fn test_version_2_accepted() {
-        // Version 2 == NKI_VERSION -> current version
+        // Version 2 remains accepted for legacy requests.
         const { assert!(2 >= MIN_NKI_VERSION && 2 <= NKI_VERSION) };
     }
 
     #[test]
-    fn test_version_3_rejected() {
-        // Version 3 > NKI_VERSION -> future version, reject
-        const { assert!(3 > NKI_VERSION) };
+    fn test_version_3_accepted() {
+        const { assert!(3 >= MIN_NKI_VERSION && 3 <= NKI_VERSION) };
+    }
+
+    #[test]
+    fn test_version_4_rejected() {
+        const { assert!(4 > NKI_VERSION) };
     }
 
     // -- Base64 encoding --

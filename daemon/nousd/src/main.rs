@@ -85,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             context_revision: "context-v1".into(),
         },
         timeout_ms: 10_000,
+        effect_contract: None,
     };
     let execution = runtime.execute(&request).await?;
     println!("{}", serde_json::to_string(&execution)?);
@@ -253,6 +254,15 @@ async fn dispatch_request(
         NKIMethods::SUBMIT_WORKLOAD => {
             match serde_json::from_slice::<OperationRequest>(&request.payload) {
                 Ok(mut operation) => {
+                    if operation.effect_contract.is_some()
+                        && request.nki_version < nous_nki::REALITY_EFFECT_NKI_VERSION
+                    {
+                        return Ok(nki_error(
+                            "NKI_VERSION_UNSUPPORTED",
+                            "reality effect contracts require NKI version 3".into(),
+                            false,
+                        ));
+                    }
                     if request.deadline_us > 0 {
                         let remaining_us = request
                             .deadline_us

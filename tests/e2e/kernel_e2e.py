@@ -190,12 +190,13 @@ class KernelProcessTests(unittest.TestCase):
         deadline_us: int | None = None,
         socket_timeout: float = 20,
         session_token: str | None = None,
+        nki_version: int = 2,
     ) -> dict:
         request_id = str(uuid.uuid4())
         envelope = {
             "request_id": request_id,
             "idempotency_key": str(uuid.uuid4()),
-            "nki_version": 2,
+            "nki_version": nki_version,
             "principal_id": "e2e-conformance",
             "session_token": cls.auth_token if session_token is None else session_token,
             "namespace": "default",
@@ -304,6 +305,30 @@ class KernelProcessTests(unittest.TestCase):
         second = self.request("SubmitWorkload", request)
         after = self.request("GetMetrics", {})["payload"]["journal_sequence"]
         self.assertEqual(first["payload"]["completed_at_us"], second["payload"]["completed_at_us"])
+        self.assertEqual(before, after)
+
+    def test_02_reality_contract_requires_v3_and_configured_verifier(self) -> None:
+        request = operation("reference", input_text="must not execute")
+        request["effect_contract"] = {
+            "schema_version": 1,
+            "effect_id": "effect-unsupported",
+            "target": "service:test",
+            "expectation": {
+                "schema": "apeir.service-health/v1",
+                "subject": "service:test",
+                "expected_value": {"http_status": 200},
+                "evidence_requirement": ["http-response"],
+            },
+            "verification": "INDEPENDENT",
+        }
+        old = self.request("SubmitWorkload", request, nki_version=2)
+        self.assertEqual(old["status"], "error")
+        self.assertEqual(old["error"]["code"], "NKI_VERSION_UNSUPPORTED")
+        before = self.request("GetMetrics", {})["payload"]["journal_sequence"]
+        current = self.request("SubmitWorkload", request, nki_version=3)
+        after = self.request("GetMetrics", {})["payload"]["journal_sequence"]
+        self.assertEqual(current["status"], "error")
+        self.assertIn("observer and verifier", current["error"]["message"])
         self.assertEqual(before, after)
 
     def test_03_provider_crash_is_isolated(self) -> None:

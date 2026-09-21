@@ -617,6 +617,7 @@ mod tests {
                 context_revision: "context".into(),
             },
             timeout_ms: 1_000,
+            effect_contract: None,
         }
     }
 

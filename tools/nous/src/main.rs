@@ -279,6 +279,7 @@ async fn execute(
             context_revision: "context-v1".into(),
         },
         timeout_ms: 30_000,
+        effect_contract: None,
     };
     eprintln!("workload: {}", request.workload_id);
     call(NKIMethods::SUBMIT_WORKLOAD, serde_json::to_value(request)?).await

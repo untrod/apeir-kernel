@@ -12,11 +12,11 @@ mod golden_tests;
 
 use uuid::Uuid;
 
-/// NKI v1alpha2 schema version.
-/// Breaking change from v1alpha1: tagged enum (status: "success" | "error").
-/// v1alpha1 clients remain compatible due to #[serde(flatten)] - error field still at top level.
-/// See docs/compatibility/BREAKING_CHANGES.md
-pub const NKI_VERSION: u32 = 2;
+/// NKI v3 gates reality-effect requests. Servers still accept legacy v1/v2
+/// envelopes, but a v3 client is rejected by older servers rather than having
+/// its effect contract silently ignored.
+pub const NKI_VERSION: u32 = 3;
+pub const REALITY_EFFECT_NKI_VERSION: u32 = 3;
 
 /// Minimum supported NKI version (v1alpha1).
 /// Requests with nki_version < MIN_NKI_VERSION are rejected.
