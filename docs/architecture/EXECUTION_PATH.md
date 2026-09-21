@@ -41,6 +41,10 @@ kernel memory.
   Legacy requests commit the existing receipt; reality-contract requests
   resume observation and verification.
 - `MATCH` is the only Reality Verification result that permits commit.
+- A daemon reality adapter is opt-in through a local configuration file; its
+  allowlisted service address and target are never taken from an NKI request.
+- The reference service verifier re-derives health and version from stored raw
+  HTTP evidence. A forged observer value alone cannot produce `MATCH`.
 - `PARTIAL`, `MISMATCH`, and `UNKNOWN` fail closed.
 - An observed provider failure is durably aborted and is not re-executed on
   daemon restart. A later explicit Rebind creates a new recoverable intent for
