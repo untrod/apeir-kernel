@@ -8,6 +8,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 
+use crate::effect::EffectContract;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderRuntimeClass {
@@ -29,6 +31,45 @@ pub enum DeliverySemantics {
     ExternalCommit,
     Reconcilable,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryStrategy {
+    Replay,
+    ObserveAndReconcile,
+    CompensateThenNewAction,
+    ReconcileExternalState,
+    RequireAtLeastOnceProof,
+    FailClosed,
+}
+
+impl DeliverySemantics {
+    pub const fn may_reexecute_after_uncertain_failure(self) -> bool {
+        matches!(self, Self::Idempotent)
+    }
+
+    pub const fn requires_compensation(self) -> bool {
+        matches!(self, Self::Compensatable)
+    }
+
+    pub const fn requires_external_commit(self) -> bool {
+        matches!(self, Self::ExternalCommit)
+    }
+
+    pub const fn requires_reconciliation(self) -> bool {
+        matches!(self, Self::Reconcilable | Self::ExternalCommit)
+    }
+
+    pub const fn recovery_strategy(self) -> RecoveryStrategy {
+        match self {
+            Self::Idempotent => RecoveryStrategy::Replay,
+            Self::Reconcilable => RecoveryStrategy::ObserveAndReconcile,
+            Self::Compensatable => RecoveryStrategy::CompensateThenNewAction,
+            Self::ExternalCommit => RecoveryStrategy::ReconcileExternalState,
+            Self::AtLeastOnce => RecoveryStrategy::RequireAtLeastOnceProof,
+            Self::AtMostOnce | Self::Unknown => RecoveryStrategy::FailClosed,
+        }
+    }
 }
 
 /// Provider-neutral model input carried inside `OperationRequest.input`.
@@ -101,7 +142,7 @@ pub struct SemanticExecutionSnapshot {
     pub context_revision: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationRequest {
     pub operation_id: String,
     pub workload_id: String,
@@ -118,6 +159,9 @@ pub struct OperationRequest {
     pub delivery: DeliverySemantics,
     pub snapshot: SemanticExecutionSnapshot,
     pub timeout_ms: u64,
+    /// Optional v0.2 reality contract. Missing means the legacy v0.1 execution path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_contract: Option<EffectContract>,
 }
 
 impl OperationRequest {

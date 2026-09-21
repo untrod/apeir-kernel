@@ -15,6 +15,7 @@ pub mod checkpoint;
 pub mod contracts;
 pub mod control_api;
 pub mod device;
+pub mod effect;
 pub mod engine;
 pub mod error;
 pub mod event;
@@ -38,6 +39,10 @@ pub use control_api::{
     CONTROL_API_SCHEMA_VERSION,
 };
 pub use device::{Device, DevicePhase, DeviceSpec, DeviceStatus, TopologyLink};
+pub use effect::{
+    EffectContract, EffectExpectation, EffectVerification, EvidenceRef, ObservedEffect,
+    RealityIdentity, VerificationMode, VerificationOutcome, EFFECT_CONTRACT_SCHEMA_VERSION,
+};
 pub use engine::{Engine, EnginePhase, EngineSpec, EngineStatus};
 pub use error::{ErrorCode, NousError, RetryHint, RetryStrategy};
 pub use event::Event;
@@ -63,7 +68,7 @@ pub use resource::{
 };
 pub use runtime_api::{
     DeliverySemantics, ModelInvocationInput, ModelInvocationOutput, OperationRequest,
-    ProviderProbeRequest, ProviderRuntimeClass, SemanticExecutionSnapshot,
+    ProviderProbeRequest, ProviderRuntimeClass, RecoveryStrategy, SemanticExecutionSnapshot,
 };
 pub use traits::KernelObject;
 pub use workload::{
