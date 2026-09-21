@@ -6,6 +6,7 @@ pub enum FaultPoint {
     EffectBeforeExecute,
     EffectAfterExecute,
     EffectAfterReceipt,
+    EffectAfterObservation,
     EffectAfterCommit,
     ResourceAfterRelease,
 }
@@ -17,6 +18,7 @@ impl FaultPoint {
             Self::EffectBeforeExecute => "effect.before_execute",
             Self::EffectAfterExecute => "effect.after_execute",
             Self::EffectAfterReceipt => "effect.after_receipt",
+            Self::EffectAfterObservation => "effect.after_observation",
             Self::EffectAfterCommit => "effect.after_commit",
             Self::ResourceAfterRelease => "resource.after_release",
         }

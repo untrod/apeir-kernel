@@ -2,6 +2,7 @@ use crate::{
     assess_compatibility, BootCore, CancellationToken, CompatibilityReport, ContinuityExecution,
     ContinuityPlan, DurableExecutor, FailoverRecord, KernelError, KernelState, ModelCompatibility,
     OperationReceipt, OperationRequest, Provider, ProviderProbeReport, ProviderProbeRequest,
+    RealityObserver, RealityVerifier,
 };
 use nous_resource::admission::{AdmissionController, AdmissionDecision};
 use nous_resource::{FencedLease, LeaseManager};
@@ -66,6 +67,15 @@ impl<P: Provider> KernelRuntime<P> {
         }
     }
 
+    pub fn with_reality_verification(
+        mut self,
+        observer: Arc<dyn RealityObserver>,
+        verifier: Arc<dyn RealityVerifier>,
+    ) -> Self {
+        self.executor.configure_reality(observer, verifier);
+        self
+    }
+
     pub async fn execute(
         &self,
         request: &OperationRequest,
@@ -85,6 +95,8 @@ impl<P: Provider> KernelRuntime<P> {
         if self.core.state() == KernelState::ShuttingDown {
             return Err(KernelError::ShuttingDown);
         }
+        self.executor.preflight_reality(request)?;
+        self.executor.validate_intent(request)?;
         if let Some(receipt) = self.executor.committed_receipt(request)? {
             return Ok(RuntimeExecution {
                 workload_id: request.workload_id.clone(),
@@ -565,8 +577,14 @@ impl<P: Provider> KernelRuntime<P> {
         let mut recovered = Vec::new();
         self.revoke_orphaned_leases()?;
         for request in self.executor.pending_operations()? {
-            match request.delivery {
-                crate::DeliverySemantics::Idempotent | crate::DeliverySemantics::Reconcilable => {
+            if self.executor.received_receipt(&request)?.is_some() {
+                // Physical execution is already durable. Resume observation and
+                // verification; never call the provider a second time.
+                recovered.push(self.execute_internal(&request, true).await?);
+                continue;
+            }
+            match request.delivery.recovery_strategy() {
+                nous_types::RecoveryStrategy::Replay => {
                     recovered.push(self.execute_internal(&request, true).await?);
                 }
                 _ => return Err(KernelError::UnsafeRecovery(request.operation_id)),
@@ -892,6 +910,7 @@ mod tests {
                 context_revision: "context-v1".into(),
             },
             timeout_ms: 20_000,
+            effect_contract: None,
         }
     }
 
@@ -974,6 +993,7 @@ mod tests {
                 context_revision: "context-v1".into(),
             },
             timeout_ms: 1_000,
+            effect_contract: None,
         }
     }
 

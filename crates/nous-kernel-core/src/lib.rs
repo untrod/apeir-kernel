@@ -24,6 +24,10 @@ pub use provider::{
 
 use async_trait::async_trait;
 use nous_state::journal::{EntryType, Journal, JournalEntry};
+use nous_types::{
+    EffectContract, EffectVerification, EvidenceRef, ObservedEffect, RealityIdentity,
+    VerificationMode, VerificationOutcome,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -97,6 +101,8 @@ pub enum KernelError {
     Resource(String),
     #[error("kernel is shutting down")]
     ShuttingDown,
+    #[error("reality verification failed: {0}")]
+    RealityVerification(String),
 }
 
 impl KernelError {
@@ -112,6 +118,7 @@ impl KernelError {
             Self::Scheduling(_) => "NO_FEASIBLE_PLACEMENT",
             Self::Resource(_) => "RESOURCE_ERROR",
             Self::ShuttingDown => "KERNEL_SHUTTING_DOWN",
+            Self::RealityVerification(_) => "REALITY_VERIFICATION_FAILED",
         }
     }
 
@@ -122,7 +129,8 @@ impl KernelError {
             Self::UnsafeRecovery(_)
             | Self::Cancelled(_)
             | Self::DeadlineExceeded(_)
-            | Self::ShuttingDown => "execution",
+            | Self::ShuttingDown
+            | Self::RealityVerification(_) => "execution",
             Self::Admission(_) | Self::Resource(_) => "resource",
             Self::Scheduling(_) => "scheduler",
         }
@@ -144,9 +152,50 @@ impl KernelError {
             Self::UnsafeRecovery(_)
             | Self::Cancelled(_)
             | Self::DeadlineExceeded(_)
-            | Self::ShuttingDown => "nous-kernel-core",
+            | Self::ShuttingDown
+            | Self::RealityVerification(_) => "nous-kernel-core",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct VerificationDecision {
+    pub outcome: VerificationOutcome,
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[async_trait]
+pub trait RealityObserver: Send + Sync {
+    fn identity(&self) -> RealityIdentity;
+
+    async fn observe(
+        &self,
+        contract: &EffectContract,
+        request: &OperationRequest,
+        receipt: &OperationReceipt,
+    ) -> Result<ObservedEffect, KernelError>;
+}
+
+#[async_trait]
+pub trait RealityVerifier: Send + Sync {
+    fn identity(&self) -> RealityIdentity;
+    fn policy_revision(&self) -> String;
+
+    /// Resolve the immutable Artifact Runtime references and hash their bytes.
+    /// A verifier that cannot resolve evidence must fail closed.
+    async fn verify_evidence(&self, evidence_refs: &[EvidenceRef]) -> Result<(), KernelError>;
+
+    async fn evaluate(
+        &self,
+        contract: &EffectContract,
+        observation: &ObservedEffect,
+    ) -> Result<VerificationDecision, KernelError>;
+}
+
+#[derive(Clone)]
+struct RealityRuntime {
+    observer: Arc<dyn RealityObserver>,
+    verifier: Arc<dyn RealityVerifier>,
 }
 
 #[async_trait]
@@ -545,11 +594,24 @@ impl BootCore {
 pub(crate) struct DurableExecutor<P: Provider> {
     journal: Arc<Journal>,
     pub(crate) provider: P,
+    reality: Option<RealityRuntime>,
 }
 
 impl<P: Provider> DurableExecutor<P> {
     pub(crate) fn new(journal: Arc<Journal>, provider: P) -> Self {
-        Self { journal, provider }
+        Self {
+            journal,
+            provider,
+            reality: None,
+        }
+    }
+
+    pub(crate) fn configure_reality(
+        &mut self,
+        observer: Arc<dyn RealityObserver>,
+        verifier: Arc<dyn RealityVerifier>,
+    ) {
+        self.reality = Some(RealityRuntime { observer, verifier });
     }
 
     #[cfg(test)]
@@ -566,6 +628,8 @@ impl<P: Provider> DurableExecutor<P> {
         request: &OperationRequest,
         cancellation: CancellationToken,
     ) -> Result<OperationReceipt, KernelError> {
+        self.preflight_reality(request)?;
+        self.validate_intent(request)?;
         if let Some(receipt) = self.committed_receipt(request)? {
             return Ok(receipt);
         }
@@ -602,7 +666,19 @@ impl<P: Provider> DurableExecutor<P> {
             }
         };
 
+        if receipt.operation_id != request.operation_id
+            || receipt.input_digest != request.input_digest()
+            || receipt.snapshot_digest != digest_json(&request.snapshot)?
+            || receipt.provider_revision != request.snapshot.provider_revision
+        {
+            return Err(KernelError::UnsafeRecovery(request.operation_id.clone()));
+        }
+
         fault::trigger(FaultPoint::EffectAfterReceipt, &request.operation_id);
+
+        if let Some(contract) = &request.effect_contract {
+            self.verify_reality(request, &receipt, contract).await?;
+        }
 
         self.append(
             request,
@@ -616,6 +692,183 @@ impl<P: Provider> DurableExecutor<P> {
         Ok(receipt)
     }
 
+    pub(crate) fn preflight_reality(&self, request: &OperationRequest) -> Result<(), KernelError> {
+        if let Some(contract) = &request.effect_contract {
+            contract
+                .validate()
+                .map_err(KernelError::RealityVerification)?;
+            if contract.verification == VerificationMode::None {
+                return Err(KernelError::RealityVerification(
+                    "verification NONE cannot commit an effectful operation".into(),
+                ));
+            }
+            let reality = self.reality.as_ref().ok_or_else(|| {
+                KernelError::RealityVerification(
+                    "effect contract requires an explicitly configured observer and verifier"
+                        .into(),
+                )
+            })?;
+            reality
+                .observer
+                .identity()
+                .validate()
+                .map_err(KernelError::RealityVerification)?;
+            reality
+                .verifier
+                .identity()
+                .validate()
+                .map_err(KernelError::RealityVerification)?;
+        }
+        Ok(())
+    }
+
+    async fn verify_reality(
+        &self,
+        request: &OperationRequest,
+        receipt: &OperationReceipt,
+        contract: &EffectContract,
+    ) -> Result<EffectVerification, KernelError> {
+        contract
+            .validate()
+            .map_err(KernelError::RealityVerification)?;
+        if contract.verification == VerificationMode::None {
+            return Err(KernelError::RealityVerification(
+                "verification NONE cannot commit an effectful operation".into(),
+            ));
+        }
+        let reality = self.reality.as_ref().ok_or_else(|| {
+            KernelError::RealityVerification(
+                "effect contract requires an explicitly configured observer and verifier".into(),
+            )
+        })?;
+
+        self.append(
+            request,
+            EntryType::Transition,
+            "EffectState",
+            "EXECUTED",
+            &serde_json::json!({"effect_id": contract.effect_id}),
+            Some(format!(
+                "operation:{}:effect:executed",
+                request.operation_id
+            )),
+        )?;
+
+        let observation = if let Some(observation) = self.received_observation(request)? {
+            observation
+                .validate(contract)
+                .map_err(KernelError::RealityVerification)?;
+            observation
+        } else {
+            let observation = match reality.observer.observe(contract, request, receipt).await {
+                Ok(observation) => observation,
+                Err(error) => {
+                    self.append(
+                        request,
+                        EntryType::Transition,
+                        "EffectState",
+                        "OBSERVATION_FAILED",
+                        &serde_json::json!({"effect_id": contract.effect_id, "error": error.code()}),
+                        Some(format!(
+                            "operation:{}:effect:observation-failed",
+                            request.operation_id
+                        )),
+                    )?;
+                    return Err(error);
+                }
+            };
+            if observation.observer != reality.observer.identity() {
+                return Err(KernelError::RealityVerification(
+                    "observer receipt identity differs from configured observer".into(),
+                ));
+            }
+            observation
+                .validate(contract)
+                .map_err(KernelError::RealityVerification)?;
+            self.append(
+                request,
+                EntryType::Observation,
+                "ObservedEffect",
+                "OBSERVED",
+                &observation,
+                Some(format!("operation:{}:observation", request.operation_id)),
+            )?;
+            observation
+        };
+        fault::trigger(FaultPoint::EffectAfterObservation, &request.operation_id);
+
+        reality
+            .verifier
+            .verify_evidence(&observation.evidence_refs)
+            .await?;
+
+        let verifier = reality.verifier.identity();
+        if contract.verification == VerificationMode::Independent
+            && verifier.identity == receipt.provider_revision
+        {
+            return Err(KernelError::RealityVerification(
+                "independent verifier identity equals provider executor identity".into(),
+            ));
+        }
+        let verification = if let Some(verification) = self.received_verification(request)? {
+            verification
+                .validate_bindings(contract, &observation)
+                .map_err(KernelError::RealityVerification)?;
+            verification
+        } else {
+            let decision = reality.verifier.evaluate(contract, &observation).await?;
+            let verification = EffectVerification {
+                verification_id: uuid::Uuid::now_v7().to_string(),
+                effect_id: contract.effect_id.clone(),
+                outcome: decision.outcome,
+                effect_contract_digest: contract
+                    .digest()
+                    .map_err(KernelError::RealityVerification)?,
+                observation_digest: observation
+                    .digest()
+                    .map_err(KernelError::RealityVerification)?,
+                verifier: verifier.clone(),
+                verification_policy_revision: reality.verifier.policy_revision(),
+                evidence_refs: decision.evidence_refs,
+                verified_at: chrono::Utc::now(),
+            };
+            verification
+                .validate_bindings(contract, &observation)
+                .map_err(KernelError::RealityVerification)?;
+            let phase = match verification.outcome {
+                VerificationOutcome::Match => "VERIFIED",
+                VerificationOutcome::Partial => "PARTIAL",
+                VerificationOutcome::Mismatch => "VERIFICATION_MISMATCH",
+                VerificationOutcome::Unknown => "UNKNOWN",
+            };
+            self.append(
+                request,
+                EntryType::Observation,
+                "EffectVerification",
+                phase,
+                &verification,
+                Some(format!("operation:{}:verification", request.operation_id)),
+            )?;
+            verification
+        };
+        reality
+            .verifier
+            .verify_evidence(&verification.evidence_refs)
+            .await?;
+        if verification.verifier != verifier {
+            return Err(KernelError::RealityVerification(
+                "verification receipt identity differs from configured verifier".into(),
+            ));
+        }
+        if verification.outcome != VerificationOutcome::Match {
+            return Err(KernelError::RealityVerification(format!(
+                "effect {} verification outcome is {:?}",
+                contract.effect_id, verification.outcome
+            )));
+        }
+        Ok(verification)
+    }
+
     pub(crate) fn pending_operations(&self) -> Result<Vec<OperationRequest>, KernelError> {
         let entries = self
             .journal
@@ -624,9 +877,9 @@ impl<P: Provider> DurableExecutor<P> {
         let mut pending = HashMap::new();
         for entry in entries {
             if entry.entry_type == EntryType::Intent && entry.object_type == "Operation" {
-                if let Ok(request) = serde_json::from_slice::<OperationRequest>(&entry.payload) {
-                    pending.insert(request.operation_id.clone(), request);
-                }
+                let request = serde_json::from_slice::<OperationRequest>(&entry.payload)
+                    .map_err(|error| KernelError::Serialization(error.to_string()))?;
+                pending.insert(request.operation_id.clone(), request);
             } else if (entry.entry_type == EntryType::Commit && entry.object_type == "StepCommit")
                 || (entry.entry_type == EntryType::Abort && entry.object_type == "Operation")
             {
@@ -640,8 +893,8 @@ impl<P: Provider> DurableExecutor<P> {
     pub(crate) async fn recover(&self) -> Result<Vec<OperationReceipt>, KernelError> {
         let mut receipts = Vec::new();
         for request in self.pending_operations()? {
-            match request.delivery {
-                DeliverySemantics::Idempotent | DeliverySemantics::Reconcilable => {
+            match request.delivery.recovery_strategy() {
+                nous_types::RecoveryStrategy::Replay => {
                     receipts.push(self.execute(&request).await?);
                 }
                 _ => return Err(KernelError::UnsafeRecovery(request.operation_id)),
@@ -654,38 +907,68 @@ impl<P: Provider> DurableExecutor<P> {
         &self,
         request: &OperationRequest,
     ) -> Result<Option<OperationReceipt>, KernelError> {
-        let entries = self
-            .journal
-            .read_workload(&request.workload_id)
-            .map_err(|error| KernelError::Journal(error.to_string()))?;
-        Ok(entries
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.entry_type == EntryType::Commit
-                    && entry.object_type == "StepCommit"
-                    && entry.object_id == request.operation_id
-            })
-            .and_then(|entry| serde_json::from_slice(&entry.payload).ok()))
+        self.received_fact(request, EntryType::Commit, "StepCommit")
     }
 
-    fn received_receipt(
+    pub(crate) fn received_receipt(
         &self,
         request: &OperationRequest,
     ) -> Result<Option<OperationReceipt>, KernelError> {
+        self.received_fact(request, EntryType::Observation, "OperationReceipt")
+    }
+
+    pub(crate) fn validate_intent(&self, request: &OperationRequest) -> Result<(), KernelError> {
+        let existing: Option<OperationRequest> =
+            self.received_fact(request, EntryType::Intent, "Operation")?;
+        if let Some(existing) = existing {
+            // The NKI envelope may tighten the per-attempt deadline. It is not
+            // part of the durable effect identity; every other field is.
+            let mut candidate = request.clone();
+            candidate.timeout_ms = existing.timeout_ms;
+            if existing != candidate {
+                return Err(KernelError::UnsafeRecovery(request.operation_id.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn received_observation(
+        &self,
+        request: &OperationRequest,
+    ) -> Result<Option<ObservedEffect>, KernelError> {
+        self.received_fact(request, EntryType::Observation, "ObservedEffect")
+    }
+
+    fn received_verification(
+        &self,
+        request: &OperationRequest,
+    ) -> Result<Option<EffectVerification>, KernelError> {
+        self.received_fact(request, EntryType::Observation, "EffectVerification")
+    }
+
+    fn received_fact<T: serde::de::DeserializeOwned>(
+        &self,
+        request: &OperationRequest,
+        entry_type: EntryType,
+        object_type: &str,
+    ) -> Result<Option<T>, KernelError> {
         let entries = self
             .journal
             .read_workload(&request.workload_id)
             .map_err(|error| KernelError::Journal(error.to_string()))?;
-        Ok(entries
+        entries
             .iter()
             .rev()
             .find(|entry| {
-                entry.entry_type == EntryType::Observation
-                    && entry.object_type == "OperationReceipt"
+                entry.entry_type == entry_type
+                    && entry.object_type == object_type
                     && entry.object_id == request.operation_id
             })
-            .and_then(|entry| serde_json::from_slice(&entry.payload).ok()))
+            .map(|entry| {
+                serde_json::from_slice(&entry.payload)
+                    .map_err(|error| KernelError::Serialization(error.to_string()))
+            })
+            .transpose()
     }
 
     pub(crate) fn append<T: Serialize>(
@@ -739,6 +1022,98 @@ mod tests {
     struct DigestProvider;
 
     struct RejectProvider;
+
+    struct TestObserver {
+        value: serde_json::Value,
+        tamper_digest: bool,
+    }
+
+    struct TestVerifier {
+        identity: String,
+    }
+
+    #[async_trait]
+    impl RealityObserver for TestObserver {
+        fn identity(&self) -> RealityIdentity {
+            RealityIdentity {
+                identity: "health-observer".into(),
+                capability: "service.health.observe".into(),
+            }
+        }
+
+        async fn observe(
+            &self,
+            contract: &EffectContract,
+            _request: &OperationRequest,
+            _receipt: &OperationReceipt,
+        ) -> Result<ObservedEffect, KernelError> {
+            let evidence_refs = vec![EvidenceRef {
+                artifact_ref: format!("sha256:{}", digest_bytes(b"health-response")),
+                digest: digest_bytes(b"health-response"),
+            }];
+            let mut evidence_digest =
+                ObservedEffect::compute_evidence_digest(&self.value, &evidence_refs)
+                    .map_err(KernelError::RealityVerification)?;
+            if self.tamper_digest {
+                evidence_digest = "0".repeat(64);
+            }
+            Ok(ObservedEffect {
+                observation_id: uuid::Uuid::now_v7().to_string(),
+                effect_id: contract.effect_id.clone(),
+                subject: contract.expectation.subject.clone(),
+                schema: contract.expectation.schema.clone(),
+                observed_value: self.value.clone(),
+                observer: self.identity(),
+                observed_at: chrono::Utc::now(),
+                evidence_refs,
+                evidence_digest,
+                execution_environment_digest: Some(digest_bytes(b"arm64-host-profile")),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RealityVerifier for TestVerifier {
+        fn identity(&self) -> RealityIdentity {
+            RealityIdentity {
+                identity: self.identity.clone(),
+                capability: "service.health.verify".into(),
+            }
+        }
+
+        fn policy_revision(&self) -> String {
+            "service-health-policy-v1".into()
+        }
+
+        async fn verify_evidence(&self, evidence_refs: &[EvidenceRef]) -> Result<(), KernelError> {
+            if evidence_refs.len() == 1
+                && evidence_refs[0].artifact_ref
+                    == format!("sha256:{}", digest_bytes(b"health-response"))
+                && evidence_refs[0].digest == digest_bytes(b"health-response")
+            {
+                Ok(())
+            } else {
+                Err(KernelError::RealityVerification(
+                    "observation evidence is unavailable or mismatched".into(),
+                ))
+            }
+        }
+
+        async fn evaluate(
+            &self,
+            contract: &EffectContract,
+            observation: &ObservedEffect,
+        ) -> Result<VerificationDecision, KernelError> {
+            Ok(VerificationDecision {
+                outcome: if contract.expectation.expected_value == observation.observed_value {
+                    VerificationOutcome::Match
+                } else {
+                    VerificationOutcome::Mismatch
+                },
+                evidence_refs: observation.evidence_refs.clone(),
+            })
+        }
+    }
 
     #[async_trait]
     impl Provider for DigestProvider {
@@ -794,7 +1169,45 @@ mod tests {
                 context_revision: "context-v1".into(),
             },
             timeout_ms: 5_000,
+            effect_contract: None,
         }
+    }
+
+    fn reality_request(expected_status: u16) -> OperationRequest {
+        let mut request = request();
+        request.effect_contract = Some(EffectContract {
+            schema_version: 1,
+            effect_id: "effect-service-restart".into(),
+            target: "service:test".into(),
+            expectation: nous_types::EffectExpectation {
+                schema: "apeir.service-health/v1".into(),
+                subject: "service:test".into(),
+                expected_value: serde_json::json!({"http_status": expected_status, "version": "v2"}),
+                evidence_requirement: vec!["http-response".into()],
+            },
+            verification: VerificationMode::Independent,
+        });
+        request
+    }
+
+    fn reality_executor<P: Provider>(
+        journal: Arc<Journal>,
+        provider: P,
+        value: serde_json::Value,
+        tamper_digest: bool,
+        verifier_identity: &str,
+    ) -> DurableExecutor<P> {
+        let mut executor = DurableExecutor::new(journal, provider);
+        executor.configure_reality(
+            Arc::new(TestObserver {
+                value,
+                tamper_digest,
+            }),
+            Arc::new(TestVerifier {
+                identity: verifier_identity.into(),
+            }),
+        );
+        executor
     }
 
     #[tokio::test]
@@ -809,23 +1222,25 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_unsafe_pending_operation_recovery() {
-        let journal = Arc::new(Journal::open_in_memory().unwrap());
-        let executor = DurableExecutor::new(journal, DigestProvider);
-        let mut unsafe_request = request();
-        unsafe_request.delivery = DeliverySemantics::Unknown;
-        executor
-            .append(
-                &unsafe_request,
-                EntryType::Intent,
-                "Operation",
-                "PENDING",
-                &unsafe_request,
-                Some("operation:op-1:intent".into()),
-            )
-            .unwrap();
+        for delivery in [DeliverySemantics::AtMostOnce, DeliverySemantics::Unknown] {
+            let journal = Arc::new(Journal::open_in_memory().unwrap());
+            let executor = DurableExecutor::new(journal, DigestProvider);
+            let mut unsafe_request = request();
+            unsafe_request.delivery = delivery;
+            executor
+                .append(
+                    &unsafe_request,
+                    EntryType::Intent,
+                    "Operation",
+                    "PENDING",
+                    &unsafe_request,
+                    Some("operation:op-1:intent".into()),
+                )
+                .unwrap();
 
-        let error = executor.recover().await.unwrap_err();
-        assert!(matches!(error, KernelError::UnsafeRecovery(operation) if operation == "op-1"));
+            let error = executor.recover().await.unwrap_err();
+            assert!(matches!(error, KernelError::UnsafeRecovery(operation) if operation == "op-1"));
+        }
     }
 
     #[tokio::test]
@@ -867,6 +1282,136 @@ mod tests {
         let recovered = recovery.recover().await.unwrap();
         assert_eq!(recovered, vec![receipt]);
         assert_eq!(journal.read_workload("workload-1").unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn provider_success_does_not_commit_reality_mismatch() {
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let executor = reality_executor(
+            journal.clone(),
+            DigestProvider,
+            serde_json::json!({"http_status": 502, "version": "v2"}),
+            false,
+            "health-verifier",
+        );
+        let error = executor.execute(&reality_request(200)).await.unwrap_err();
+        assert!(matches!(error, KernelError::RealityVerification(_)));
+        let entries = journal.read_workload("workload-1").unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry.object_type == "EffectVerification" && entry.new_phase == "VERIFICATION_MISMATCH"
+        }));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.object_type == "StepCommit"));
+    }
+
+    #[tokio::test]
+    async fn matching_reality_is_required_before_commit() {
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let executor = reality_executor(
+            journal.clone(),
+            DigestProvider,
+            serde_json::json!({"http_status": 200, "version": "v2"}),
+            false,
+            "health-verifier",
+        );
+        executor.execute(&reality_request(200)).await.unwrap();
+        let entries = journal.read_workload("workload-1").unwrap();
+        let verification = entries
+            .iter()
+            .position(|entry| entry.object_type == "EffectVerification")
+            .unwrap();
+        let commit = entries
+            .iter()
+            .position(|entry| entry.object_type == "StepCommit")
+            .unwrap();
+        assert!(verification < commit);
+    }
+
+    #[tokio::test]
+    async fn recovery_after_execution_resumes_verification_without_provider_replay() {
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let request = reality_request(200);
+        let receipt = OperationReceipt {
+            operation_id: request.operation_id.clone(),
+            input_digest: request.input_digest(),
+            output_digest: digest_bytes(request.input.as_bytes()),
+            snapshot_digest: digest_json(&request.snapshot).unwrap(),
+            provider_revision: request.snapshot.provider_revision.clone(),
+            result: "provider-success".into(),
+            completed_at_us: 1,
+        };
+        let writer = DurableExecutor::new(journal.clone(), DigestProvider);
+        writer
+            .append(
+                &request,
+                EntryType::Intent,
+                "Operation",
+                "PENDING",
+                &request,
+                Some("reality:intent".into()),
+            )
+            .unwrap();
+        writer
+            .append(
+                &request,
+                EntryType::Observation,
+                "OperationReceipt",
+                "RECEIVED",
+                &receipt,
+                Some("reality:receipt".into()),
+            )
+            .unwrap();
+        let recovery = reality_executor(
+            journal.clone(),
+            RejectProvider,
+            serde_json::json!({"http_status": 200, "version": "v2"}),
+            false,
+            "health-verifier",
+        );
+        assert_eq!(recovery.recover().await.unwrap(), vec![receipt]);
+        assert!(journal
+            .read_workload("workload-1")
+            .unwrap()
+            .iter()
+            .any(|entry| entry.object_type == "StepCommit"));
+    }
+
+    #[tokio::test]
+    async fn evidence_tampering_prevents_verified_commit() {
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let executor = reality_executor(
+            journal.clone(),
+            DigestProvider,
+            serde_json::json!({"http_status": 200, "version": "v2"}),
+            true,
+            "health-verifier",
+        );
+        assert!(executor.execute(&reality_request(200)).await.is_err());
+        assert!(!journal
+            .read_workload("workload-1")
+            .unwrap()
+            .iter()
+            .any(|entry| entry.object_type == "StepCommit"));
+    }
+
+    #[tokio::test]
+    async fn independent_verifier_cannot_be_the_executor() {
+        let journal = Arc::new(Journal::open_in_memory().unwrap());
+        let executor = reality_executor(
+            journal.clone(),
+            DigestProvider,
+            serde_json::json!({"http_status": 200, "version": "v2"}),
+            false,
+            "digest-v1",
+        );
+        let error = executor.execute(&reality_request(200)).await.unwrap_err();
+        assert!(error.to_string().contains("independent verifier"));
+        assert!(!journal
+            .read_workload("workload-1")
+            .unwrap()
+            .iter()
+            .any(|entry| entry.object_type == "StepCommit"));
     }
 
     #[tokio::test]
