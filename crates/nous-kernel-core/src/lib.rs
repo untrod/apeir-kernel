@@ -755,6 +755,11 @@ impl<P: Provider> DurableExecutor<P> {
         )?;
 
         let observation = if let Some(observation) = self.received_observation(request)? {
+            if observation.observer != reality.observer.identity() {
+                return Err(KernelError::RealityVerification(
+                    "durable observer identity differs from configured observer".into(),
+                ));
+            }
             observation
                 .validate(contract)
                 .map_err(KernelError::RealityVerification)?;
@@ -811,6 +816,13 @@ impl<P: Provider> DurableExecutor<P> {
             ));
         }
         let verification = if let Some(verification) = self.received_verification(request)? {
+            if verification.verifier != verifier
+                || verification.verification_policy_revision != reality.verifier.policy_revision()
+            {
+                return Err(KernelError::RealityVerification(
+                    "durable verifier identity or policy differs from configured verifier".into(),
+                ));
+            }
             verification
                 .validate_bindings(contract, &observation)
                 .map_err(KernelError::RealityVerification)?;
