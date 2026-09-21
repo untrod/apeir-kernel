@@ -1,3 +1,5 @@
+mod reality_service;
+
 use nous_control_plane::{
     AssetKind, AssetSelector, ControlPlaneError, ControlPlaneStore, ListAssetsRequest,
     PutAssetRequest,
@@ -43,11 +45,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let journal = PathBuf::from(args.get(2).ok_or("journal path is required")?);
         let worker = PathBuf::from(args.get(3).ok_or("provider worker path is required")?);
         let address = args.get(4).map(String::as_str).unwrap_or("127.0.0.1:8771");
-        return serve(journal, worker, address).await;
+        let reality_config = args.get(5).map(PathBuf::from);
+        return serve(journal, worker, address, reality_config).await;
     }
     if args.get(1).map(String::as_str) != Some("run-once") {
         eprintln!(
-            "usage: apeird (or nousd) <serve JOURNAL WORKER [ADDRESS] | run-once JOURNAL WORKER INPUT | inspect JOURNAL>"
+            "usage: apeird (or nousd) <serve JOURNAL WORKER [ADDRESS] [REALITY_SERVICE_CONFIG] | run-once JOURNAL WORKER INPUT | inspect JOURNAL>"
         );
         std::process::exit(2);
     }
@@ -97,6 +100,7 @@ async fn serve(
     journal: PathBuf,
     worker: PathBuf,
     address: &str,
+    reality_config: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let session_token = std::env::var("NOUS_NKI_TOKEN").unwrap_or_default();
     if !session_token.is_empty() && session_token.len() < 32 {
@@ -104,12 +108,17 @@ async fn serve(
     }
     let session_token = Arc::new(session_token);
     let control_path = journal.with_extension("control.db");
+    let reality = reality_config
+        .as_deref()
+        .map(|path| reality_service::load(path, &journal))
+        .transpose()?;
     let core = Arc::new(BootCore::open(journal)?);
     let control = Arc::new(ControlPlaneStore::open(control_path)?);
-    let runtime = Arc::new(KernelRuntime::new(
-        core.clone(),
-        ProcessProvider::new(worker),
-    ));
+    let mut runtime = KernelRuntime::new(core.clone(), ProcessProvider::new(worker));
+    if let Some((observer, verifier)) = reality {
+        runtime = runtime.with_reality_verification(observer, verifier);
+    }
+    let runtime = Arc::new(runtime);
     runtime.recover().await?;
     let listener = TcpListener::bind(address).await?;
     if !listener.local_addr()?.ip().is_loopback() {

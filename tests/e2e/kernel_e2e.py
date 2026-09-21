@@ -191,6 +191,7 @@ class KernelProcessTests(unittest.TestCase):
         socket_timeout: float = 20,
         session_token: str | None = None,
         nki_version: int = 2,
+        address: tuple[str, int] | None = None,
     ) -> dict:
         request_id = str(uuid.uuid4())
         envelope = {
@@ -208,7 +209,7 @@ class KernelProcessTests(unittest.TestCase):
             "payload": base64.b64encode(json.dumps(payload).encode()).decode(),
         }
         body = json.dumps(envelope, separators=(",", ":")).encode()
-        with socket.create_connection(cls.address, timeout=socket_timeout) as connection:
+        with socket.create_connection(address or cls.address, timeout=socket_timeout) as connection:
             connection.sendall(struct.pack(">I", len(body)) + body)
             size = struct.unpack(">I", cls.read_exact(connection, 4))[0]
             response = json.loads(cls.read_exact(connection, size))
@@ -707,6 +708,116 @@ class KernelProcessTests(unittest.TestCase):
                 self.assertEqual(denied["status"], "error", denied)
                 after = self.request("GetMetrics", {})["payload"]["journal_sequence"]
                 self.assertEqual(before, after, "rejected authorization must not mutate journal")
+
+    def test_15_configured_reality_service_runs_through_nki(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nous-reality-nki-") as directory:
+            root = Path(directory)
+            service_address = free_address()
+            daemon_address = free_address()
+            mode = root / "service-mode.json"
+            mode.write_text(json.dumps({"status": 200, "version": "v2"}), encoding="utf-8")
+            fixture = ROOT / "crates/nous-kernel-core/tests/fixtures/service_health.py"
+            service = subprocess.Popen(
+                ["python", str(fixture), str(service_address[1]), str(mode)],
+                cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            daemon = None
+            try:
+                for _ in range(100):
+                    if service.poll() is not None:
+                        self.fail("reality service fixture exited")
+                    try:
+                        with socket.create_connection(service_address, timeout=0.2):
+                            break
+                    except OSError:
+                        time.sleep(0.02)
+                else:
+                    self.fail("reality service fixture did not start")
+
+                config = root / "reality-config.json"
+                config.write_text(json.dumps({
+                    "schema_version": 1,
+                    "target": "service:nki-test",
+                    "subject": "service:nki-test",
+                    "service_address": f"{service_address[0]}:{service_address[1]}",
+                }), encoding="utf-8")
+                journal = root / "reality.db"
+                environment = os.environ.copy()
+                environment["NOUS_NKI_TOKEN"] = self.auth_token
+                daemon = subprocess.Popen(
+                    [str(NOUSD), "serve", str(journal), str(WORKER),
+                     f"{daemon_address[0]}:{daemon_address[1]}", str(config)],
+                    cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    text=True,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+                    env=environment,
+                )
+                for _ in range(200):
+                    if daemon.poll() is not None:
+                        self.fail(f"configured nousd exited: {daemon.stderr.read()}")
+                    try:
+                        with socket.create_connection(daemon_address, timeout=0.2):
+                            break
+                    except OSError:
+                        time.sleep(0.05)
+                else:
+                    self.fail("configured nousd did not start")
+
+                def contracted_request() -> dict:
+                    request = operation("reference", input_text="service effect")
+                    request["delivery"] = "AT_MOST_ONCE"
+                    request["effect_contract"] = {
+                        "schema_version": 1,
+                        "effect_id": "effect-" + request["operation_id"],
+                        "target": "service:nki-test",
+                        "expectation": {
+                            "schema": "apeir.service-health/v1",
+                            "subject": "service:nki-test",
+                            "expected_value": {"http_status": 200, "version": "v2"},
+                            "evidence_requirement": ["http-health", "http-version"],
+                        },
+                        "verification": "INDEPENDENT",
+                    }
+                    return request
+
+                healthy = self.request(
+                    "SubmitWorkload", contracted_request(), nki_version=3,
+                    address=daemon_address,
+                )
+                self.assertEqual(healthy["status"], "success", healthy)
+                self.assertEqual(healthy["payload"]["executor_identity"], "apeir.process-provider")
+                evidence_dir = journal.with_suffix(".evidence")
+                evidence_files = list(evidence_dir.iterdir())
+                self.assertEqual(len(evidence_files), 2)
+                for path in evidence_files:
+                    self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), path.name)
+
+                mode.write_text(json.dumps({"status": 502, "version": "v2"}), encoding="utf-8")
+                unhealthy = self.request(
+                    "SubmitWorkload", contracted_request(), nki_version=3,
+                    address=daemon_address,
+                )
+                self.assertEqual(unhealthy["status"], "error", unhealthy)
+                self.assertEqual(unhealthy["error"]["code"], "REALITY_VERIFICATION_FAILED")
+
+                outside_scope = contracted_request()
+                outside_scope["effect_contract"]["target"] = "service:other"
+                before = self.request("GetMetrics", {}, address=daemon_address)["payload"]["journal_sequence"]
+                denied = self.request(
+                    "SubmitWorkload", outside_scope, nki_version=3,
+                    address=daemon_address,
+                )
+                after = self.request("GetMetrics", {}, address=daemon_address)["payload"]["journal_sequence"]
+                self.assertEqual(denied["status"], "error", denied)
+                self.assertEqual(before, after)
+            finally:
+                if daemon is not None:
+                    daemon.kill()
+                    daemon.wait(timeout=10)
+                    if daemon.stderr is not None:
+                        daemon.stderr.close()
+                service.kill()
+                service.wait(timeout=10)
 
 
 if __name__ == "__main__":

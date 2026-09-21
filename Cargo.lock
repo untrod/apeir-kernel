@@ -921,13 +921,16 @@ dependencies = [
 name = "nousd"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "nous-control-plane",
  "nous-kernel-core",
  "nous-nki",
  "nous-state",
  "nous-types",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
 ]
