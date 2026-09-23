@@ -25,6 +25,7 @@ pub mod node;
 pub mod open_runtime;
 pub mod principal;
 pub mod profile;
+pub mod remote_execution;
 pub mod resource;
 pub mod runtime_api;
 pub mod traits;
@@ -41,7 +42,8 @@ pub use control_api::{
 pub use device::{Device, DevicePhase, DeviceSpec, DeviceStatus, TopologyLink};
 pub use effect::{
     EffectContract, EffectExpectation, EffectVerification, EvidenceRef, ObservedEffect,
-    RealityIdentity, VerificationMode, VerificationOutcome, EFFECT_CONTRACT_SCHEMA_VERSION,
+    RealityIdentity, TargetBinding, VerificationMode, VerificationOutcome,
+    EFFECT_CONTRACT_SCHEMA_VERSION, TARGET_BINDING_SCHEMA_VERSION,
 };
 pub use engine::{Engine, EnginePhase, EngineSpec, EngineStatus};
 pub use error::{ErrorCode, NousError, RetryHint, RetryStrategy};
@@ -63,6 +65,7 @@ pub use open_runtime::{
 };
 pub use principal::{CapabilityGrant, Principal, PrincipalSpec, PrincipalStatus, PrincipalType};
 pub use profile::{RuntimeProfile, RuntimeProfileCapabilities};
+pub use remote_execution::{RemoteExecutionReceipt, SignedNodeEnvelope};
 pub use resource::{
     PreemptionPolicy, PriorityClass, ResourceDomain, ResourceLease, ResourceLimits, ResourceVector,
 };

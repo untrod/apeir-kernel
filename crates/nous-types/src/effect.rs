@@ -6,6 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const EFFECT_CONTRACT_SCHEMA_VERSION: u32 = 1;
+pub const TARGET_BINDING_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -62,6 +63,67 @@ impl EffectContract {
     }
 
     pub fn digest(&self) -> Result<String, String> {
+        canonical_digest(self)
+    }
+}
+
+/// Versioned, governed resolution of an intent-level target reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetBinding {
+    pub schema_version: u32,
+    pub target_ref: String,
+    pub target_kind: String,
+    pub node_id: String,
+    pub adapter_id: String,
+    pub adapter_revision: String,
+    pub endpoint_binding: Value,
+    #[serde(default)]
+    pub allowed_effect_schemas: Vec<String>,
+    pub revision: String,
+}
+
+impl TargetBinding {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != TARGET_BINDING_SCHEMA_VERSION {
+            return Err("target binding schema_version must be 1".into());
+        }
+        if self.target_ref.is_empty()
+            || self.target_kind.is_empty()
+            || self.node_id.is_empty()
+            || self.adapter_id.is_empty()
+            || self.adapter_revision.is_empty()
+            || self.revision.is_empty()
+            || !self.endpoint_binding.is_object()
+            || self.allowed_effect_schemas.is_empty()
+            || self
+                .allowed_effect_schemas
+                .iter()
+                .any(|schema| schema.is_empty())
+        {
+            return Err(
+                "target binding identities, endpoint, effects, and revision are required".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn admits(&self, contract: &EffectContract) -> Result<(), String> {
+        self.validate()?;
+        contract.validate()?;
+        if contract.target != self.target_ref
+            || !self
+                .allowed_effect_schemas
+                .iter()
+                .any(|schema| schema == &contract.expectation.schema)
+        {
+            return Err("effect contract is outside the target binding".into());
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String, String> {
+        self.validate()?;
         canonical_digest(self)
     }
 }
