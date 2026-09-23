@@ -259,8 +259,27 @@ impl EffectVerification {
 }
 
 pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, String> {
-    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let bytes = canonical_json_bytes(value)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+pub(crate) fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
+    let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
+    serde_json::to_vec(&sort_json(value)).map_err(|error| error.to_string())
+}
+
+fn sort_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let sorted = object
+                .into_iter()
+                .map(|(key, value)| (key, sort_json(value)))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(sort_json).collect()),
+        other => other,
+    }
 }
 
 fn is_sha256(value: &str) -> bool {

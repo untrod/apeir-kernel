@@ -23,10 +23,11 @@ pub use provider::{
 };
 
 use async_trait::async_trait;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use nous_state::journal::{EntryType, Journal, JournalEntry};
 use nous_types::{
     EffectContract, EffectVerification, EvidenceRef, ObservedEffect, RealityIdentity,
-    VerificationMode, VerificationOutcome,
+    RemoteExecutionReceipt, TargetBinding, VerificationMode, VerificationOutcome,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,6 +60,9 @@ pub struct OperationReceipt {
     pub provider_revision: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_identity: Option<String>,
+    /// Signed remote fact admitted by Kernel policy. Absence denotes a local provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_execution: Option<RemoteExecutionReceipt>,
     pub result: String,
     pub completed_at_us: i64,
 }
@@ -91,6 +95,8 @@ pub enum KernelError {
     Serialization(String),
     #[error("unsafe recovery for operation {0}")]
     UnsafeRecovery(String),
+    #[error("manual recovery required for operation {0}")]
+    RecoveryRequired(String),
     #[error("operation cancelled: {0}")]
     Cancelled(String),
     #[error("operation deadline exceeded: {0}")]
@@ -114,6 +120,7 @@ impl KernelError {
             Self::Provider(_) => "PROVIDER_ERROR",
             Self::Serialization(_) => "SERIALIZATION_ERROR",
             Self::UnsafeRecovery(_) => "UNSAFE_RECOVERY",
+            Self::RecoveryRequired(_) => "RECOVERY_REQUIRED",
             Self::Cancelled(_) => "OPERATION_CANCELLED",
             Self::DeadlineExceeded(_) => "DEADLINE_EXCEEDED",
             Self::Admission(_) => "ADMISSION_DENIED",
@@ -129,6 +136,7 @@ impl KernelError {
             Self::Journal(_) | Self::Serialization(_) => "state",
             Self::Provider(_) => "provider",
             Self::UnsafeRecovery(_)
+            | Self::RecoveryRequired(_)
             | Self::Cancelled(_)
             | Self::DeadlineExceeded(_)
             | Self::ShuttingDown
@@ -152,6 +160,7 @@ impl KernelError {
             Self::Scheduling(_) => "nous-scheduler",
             Self::Admission(_) | Self::Resource(_) => "nous-resource",
             Self::UnsafeRecovery(_)
+            | Self::RecoveryRequired(_)
             | Self::Cancelled(_)
             | Self::DeadlineExceeded(_)
             | Self::ShuttingDown
@@ -200,10 +209,104 @@ pub trait RealityVerifier: Send + Sync {
     ) -> Result<VerificationDecision, KernelError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealityAdapterDescriptor {
+    pub adapter_id: String,
+    pub adapter_revision: String,
+    pub effect_schema: String,
+    pub target_kind: String,
+    pub evidence_schema: String,
+    pub observer_identity: RealityIdentity,
+    pub verifier_identity: RealityIdentity,
+    pub authority: String,
+}
+
+impl RealityAdapterDescriptor {
+    pub fn validate(&self) -> Result<(), KernelError> {
+        self.observer_identity
+            .validate()
+            .map_err(KernelError::RealityVerification)?;
+        self.verifier_identity
+            .validate()
+            .map_err(KernelError::RealityVerification)?;
+        if self.adapter_id.is_empty()
+            || self.adapter_revision.is_empty()
+            || self.effect_schema.is_empty()
+            || self.target_kind.is_empty()
+            || self.evidence_schema.is_empty()
+            || self.authority != "none"
+        {
+            return Err(KernelError::RealityVerification(
+                "reality adapter descriptor is incomplete or claims authority".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct ResolvedRealityAdapter {
+    pub descriptor: RealityAdapterDescriptor,
+    pub target: TargetBinding,
+    pub observer: Arc<dyn RealityObserver>,
+    pub verifier: Arc<dyn RealityVerifier>,
+}
+
+pub trait RealityAdapterRegistry: Send + Sync {
+    fn resolve(&self, contract: &EffectContract) -> Result<ResolvedRealityAdapter, KernelError>;
+    fn descriptors(&self) -> Vec<RealityAdapterDescriptor>;
+}
+
+pub trait NodeTrustResolver: Send + Sync {
+    fn public_key_hex(&self, node_id: &str) -> Result<Option<String>, KernelError>;
+}
+
 #[derive(Clone)]
 struct RealityRuntime {
+    registry: Arc<dyn RealityAdapterRegistry>,
+    node_trust: Option<Arc<dyn NodeTrustResolver>>,
+}
+
+struct FixedRealityRegistry {
     observer: Arc<dyn RealityObserver>,
     verifier: Arc<dyn RealityVerifier>,
+}
+
+impl RealityAdapterRegistry for FixedRealityRegistry {
+    fn resolve(&self, contract: &EffectContract) -> Result<ResolvedRealityAdapter, KernelError> {
+        self.observer.admit_contract(contract)?;
+        let descriptor = RealityAdapterDescriptor {
+            adapter_id: "apeir.fixed-reference/v1".into(),
+            adapter_revision: "1".into(),
+            effect_schema: contract.expectation.schema.clone(),
+            target_kind: "reference".into(),
+            evidence_schema: contract.expectation.schema.clone(),
+            observer_identity: self.observer.identity(),
+            verifier_identity: self.verifier.identity(),
+            authority: "none".into(),
+        };
+        descriptor.validate()?;
+        Ok(ResolvedRealityAdapter {
+            descriptor,
+            target: TargetBinding {
+                schema_version: nous_types::TARGET_BINDING_SCHEMA_VERSION,
+                target_ref: contract.target.clone(),
+                target_kind: "reference".into(),
+                node_id: "local-kernel".into(),
+                adapter_id: "apeir.fixed-reference/v1".into(),
+                adapter_revision: "1".into(),
+                endpoint_binding: serde_json::json!({}),
+                allowed_effect_schemas: vec![contract.expectation.schema.clone()],
+                revision: "reference-only".into(),
+            },
+            observer: self.observer.clone(),
+            verifier: self.verifier.clone(),
+        })
+    }
+
+    fn descriptors(&self) -> Vec<RealityAdapterDescriptor> {
+        Vec::new()
+    }
 }
 
 #[async_trait]
@@ -292,6 +395,8 @@ impl ProcessProvider {
             "LOCALAPPDATA",
             "APPDATA",
             "USERPROFILE",
+            "APEIR_RELAY_STATE_DIR",
+            "APEIR_REALITY_CONFIG",
         ] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -360,10 +465,7 @@ impl ProcessProvider {
         if !output.status.success() {
             if let Ok(response) = &response {
                 if !response.ok {
-                    return Err(KernelError::Provider(format!(
-                        "{}: {}",
-                        response.error_code, response.error_message
-                    )));
+                    return Err(provider_response_error(response, operation_id));
                 }
             }
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -375,17 +477,36 @@ impl ProcessProvider {
         }
         let response = response?;
         if !response.ok {
-            return Err(KernelError::Provider(format!(
-                "{}: {}",
-                response.error_code, response.error_message
-            )));
+            return Err(provider_response_error(&response, operation_id));
         }
         Ok(response)
     }
 }
 
+fn provider_response_error(response: &ProviderResponse, operation_id: &str) -> KernelError {
+    if response.error_code == "NOUS_NODE_UNCERTAIN_EFFECT"
+        || response.error_code == "RECOVERY_REQUIRED"
+    {
+        KernelError::RecoveryRequired(operation_id.into())
+    } else {
+        KernelError::Provider(format!(
+            "{}: {}",
+            response.error_code, response.error_message
+        ))
+    }
+}
+
 fn external_provider_request(command: &ProviderCommand) -> Result<serde_json::Value, KernelError> {
     match command {
+        ProviderCommand::Execute { request }
+            if request.execution_domain == ProviderRuntimeClass::Remote =>
+        {
+            Ok(serde_json::json!({
+                "schema_version": 2,
+                "type": "execute",
+                "request": request,
+            }))
+        }
         ProviderCommand::Execute { request } => Ok(serde_json::json!({
             "schema_version": 1,
             "type": "execute",
@@ -432,15 +553,35 @@ fn normalize_external_provider_response(
                     KernelError::Provider("external provider returned no string output".into())
                 })?
                 .to_owned();
+            let remote_execution = body
+                .get("remote_execution_receipt")
+                .cloned()
+                .map(serde_json::from_value::<RemoteExecutionReceipt>)
+                .transpose()
+                .map_err(|error| {
+                    KernelError::Provider(format!("malformed remote execution receipt: {error}"))
+                })?;
+            if request.execution_domain == ProviderRuntimeClass::Remote
+                && remote_execution.is_none()
+            {
+                return Err(KernelError::Provider(
+                    "remote provider returned no signed execution receipt".into(),
+                ));
+            }
+            let output_digest = remote_execution
+                .as_ref()
+                .map(|receipt| receipt.output_digest.clone())
+                .unwrap_or_else(|| digest_bytes(result.as_bytes()));
             Ok(ProviderResponse {
                 ok: true,
                 receipt: Some(OperationReceipt {
                     operation_id: request.operation_id.clone(),
                     input_digest: request.input_digest(),
-                    output_digest: digest_bytes(result.as_bytes()),
+                    output_digest,
                     snapshot_digest: digest_json(&request.snapshot)?,
                     provider_revision: request.snapshot.provider_revision.clone(),
                     executor_identity: None,
+                    remote_execution,
                     result,
                     completed_at_us: chrono::Utc::now().timestamp_micros(),
                 }),
@@ -624,12 +765,34 @@ impl<P: Provider> DurableExecutor<P> {
         }
     }
 
+    pub(crate) fn configure_reality_registry(
+        &mut self,
+        registry: Arc<dyn RealityAdapterRegistry>,
+        node_trust: Option<Arc<dyn NodeTrustResolver>>,
+    ) {
+        self.reality = Some(RealityRuntime {
+            registry,
+            node_trust,
+        });
+    }
+
+    pub(crate) fn reality_descriptors(&self) -> Vec<RealityAdapterDescriptor> {
+        self.reality
+            .as_ref()
+            .map(|runtime| runtime.registry.descriptors())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
     pub(crate) fn configure_reality(
         &mut self,
         observer: Arc<dyn RealityObserver>,
         verifier: Arc<dyn RealityVerifier>,
     ) {
-        self.reality = Some(RealityRuntime { observer, verifier });
+        self.configure_reality_registry(
+            Arc::new(FixedRealityRegistry { observer, verifier }),
+            None,
+        );
     }
 
     #[cfg(test)]
@@ -660,6 +823,23 @@ impl<P: Provider> DurableExecutor<P> {
             Some(format!("operation:{}:intent", request.operation_id)),
         )?;
 
+        if let Some(contract) = &request.effect_contract {
+            let reality = self.reality.as_ref().ok_or_else(|| {
+                KernelError::RealityVerification(
+                    "effect contract requires a configured reality registry".into(),
+                )
+            })?;
+            let adapter = reality.registry.resolve(contract)?;
+            self.append(
+                request,
+                EntryType::Observation,
+                "TargetBinding",
+                "RESOLVED",
+                &adapter.target,
+                Some(format!("operation:{}:target-binding", request.operation_id)),
+            )?;
+        }
+
         fault::trigger(FaultPoint::EffectAfterIntent, &request.operation_id);
 
         if cancellation.is_cancelled() {
@@ -669,12 +849,36 @@ impl<P: Provider> DurableExecutor<P> {
         let receipt = match self.received_receipt(request)? {
             Some(receipt) => receipt,
             None => {
+                if request.effect_contract.is_some() {
+                    self.append(
+                        request,
+                        EntryType::Transition,
+                        "EffectState",
+                        "EXECUTION_DISPATCHED",
+                        &serde_json::json!({"operation_id": request.operation_id}),
+                        Some(format!(
+                            "operation:{}:execution-dispatched",
+                            request.operation_id
+                        )),
+                    )?;
+                }
                 fault::trigger(FaultPoint::EffectBeforeExecute, &request.operation_id);
-                let mut receipt = self.provider.execute(request, cancellation).await?;
+                let mut receipt = match self.provider.execute(request, cancellation).await {
+                    Ok(receipt) => receipt,
+                    Err(KernelError::RecoveryRequired(operation_id)) => {
+                        self.record_recovery_required(
+                            request,
+                            "remote execution outcome is uncertain",
+                        )?;
+                        return Err(KernelError::RecoveryRequired(operation_id));
+                    }
+                    Err(error) => return Err(error),
+                };
                 if request.effect_contract.is_some() {
                     receipt.executor_identity = Some(self.provider.executor_identity());
                 }
                 fault::trigger(FaultPoint::EffectAfterExecute, &request.operation_id);
+                self.validate_receipt(request, &receipt)?;
                 self.append(
                     request,
                     EntryType::Observation,
@@ -687,18 +891,7 @@ impl<P: Provider> DurableExecutor<P> {
             }
         };
 
-        if receipt.operation_id != request.operation_id
-            || receipt.input_digest != request.input_digest()
-            || receipt.snapshot_digest != digest_json(&request.snapshot)?
-            || receipt.provider_revision != request.snapshot.provider_revision
-            || (request.effect_contract.is_some()
-                && receipt
-                    .executor_identity
-                    .as_deref()
-                    .is_none_or(str::is_empty))
-        {
-            return Err(KernelError::UnsafeRecovery(request.operation_id.clone()));
-        }
+        self.validate_receipt(request, &receipt)?;
 
         fault::trigger(FaultPoint::EffectAfterReceipt, &request.operation_id);
 
@@ -718,6 +911,71 @@ impl<P: Provider> DurableExecutor<P> {
         Ok(receipt)
     }
 
+    fn validate_receipt(
+        &self,
+        request: &OperationRequest,
+        receipt: &OperationReceipt,
+    ) -> Result<(), KernelError> {
+        if receipt.operation_id != request.operation_id
+            || receipt.input_digest != request.input_digest()
+            || receipt.snapshot_digest != digest_json(&request.snapshot)?
+            || receipt.provider_revision != request.snapshot.provider_revision
+            || (request.effect_contract.is_some()
+                && receipt
+                    .executor_identity
+                    .as_deref()
+                    .is_none_or(str::is_empty))
+        {
+            return Err(KernelError::UnsafeRecovery(request.operation_id.clone()));
+        }
+        if request.effect_contract.is_some()
+            && request.execution_domain == ProviderRuntimeClass::Remote
+            && receipt.remote_execution.is_none()
+        {
+            return Err(KernelError::RealityVerification(
+                "remote effect execution requires a signed remote receipt".into(),
+            ));
+        }
+        if let Some(remote) = &receipt.remote_execution {
+            if receipt.output_digest != remote.output_digest {
+                return Err(KernelError::RealityVerification(
+                    "kernel and remote receipt output digests differ".into(),
+                ));
+            }
+            let contract = request.effect_contract.as_ref().ok_or_else(|| {
+                KernelError::RealityVerification(
+                    "remote receipt requires an effect contract".into(),
+                )
+            })?;
+            let reality = self.reality.as_ref().ok_or_else(|| {
+                KernelError::RealityVerification(
+                    "remote receipt requires a configured reality registry".into(),
+                )
+            })?;
+            let adapter = reality.registry.resolve(contract)?;
+            remote
+                .validate_bindings(request, contract, &adapter.target)
+                .map_err(KernelError::RealityVerification)?;
+            if contract.verification == VerificationMode::Independent
+                && adapter.verifier.identity().identity == remote.executor_id
+            {
+                return Err(KernelError::RealityVerification(
+                    "independent verifier identity equals remote executor identity".into(),
+                ));
+            }
+            let trust = reality.node_trust.as_ref().ok_or_else(|| {
+                KernelError::RealityVerification(
+                    "remote receipt requires a node trust resolver".into(),
+                )
+            })?;
+            let public_key = trust.public_key_hex(&remote.node_id)?.ok_or_else(|| {
+                KernelError::RealityVerification("remote node identity is not trusted".into())
+            })?;
+            verify_node_signature(remote, &public_key)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn preflight_reality(&self, request: &OperationRequest) -> Result<(), KernelError> {
         if let Some(contract) = &request.effect_contract {
             contract
@@ -734,19 +992,35 @@ impl<P: Provider> DurableExecutor<P> {
                         .into(),
                 )
             })?;
-            reality
+            let adapter = reality.registry.resolve(contract)?;
+            adapter.descriptor.validate()?;
+            adapter
+                .target
+                .admits(contract)
+                .map_err(KernelError::RealityVerification)?;
+            adapter
                 .observer
                 .identity()
                 .validate()
                 .map_err(KernelError::RealityVerification)?;
-            reality.observer.admit_contract(contract)?;
-            reality
+            adapter.observer.admit_contract(contract)?;
+            adapter
                 .verifier
                 .identity()
                 .validate()
                 .map_err(KernelError::RealityVerification)?;
+            if adapter.descriptor.observer_identity != adapter.observer.identity()
+                || adapter.descriptor.verifier_identity != adapter.verifier.identity()
+                || adapter.descriptor.effect_schema != contract.expectation.schema
+                || adapter.descriptor.adapter_id != adapter.target.adapter_id
+                || adapter.descriptor.adapter_revision != adapter.target.adapter_revision
+            {
+                return Err(KernelError::RealityVerification(
+                    "reality registry descriptor or target binding mismatch".into(),
+                ));
+            }
             if contract.verification == VerificationMode::Independent
-                && reality.verifier.identity().identity == self.provider.executor_identity()
+                && adapter.verifier.identity().identity == self.provider.executor_identity()
             {
                 return Err(KernelError::RealityVerification(
                     "independent verifier identity equals kernel-owned executor identity".into(),
@@ -775,6 +1049,7 @@ impl<P: Provider> DurableExecutor<P> {
                 "effect contract requires an explicitly configured observer and verifier".into(),
             )
         })?;
+        let adapter = reality.registry.resolve(contract)?;
 
         self.append(
             request,
@@ -789,7 +1064,7 @@ impl<P: Provider> DurableExecutor<P> {
         )?;
 
         let observation = if let Some(observation) = self.received_observation(request)? {
-            if observation.observer != reality.observer.identity() {
+            if observation.observer != adapter.observer.identity() {
                 return Err(KernelError::RealityVerification(
                     "durable observer identity differs from configured observer".into(),
                 ));
@@ -799,7 +1074,7 @@ impl<P: Provider> DurableExecutor<P> {
                 .map_err(KernelError::RealityVerification)?;
             observation
         } else {
-            let observation = match reality.observer.observe(contract, request, receipt).await {
+            let observation = match adapter.observer.observe(contract, request, receipt).await {
                 Ok(observation) => observation,
                 Err(error) => {
                     self.append(
@@ -816,7 +1091,7 @@ impl<P: Provider> DurableExecutor<P> {
                     return Err(error);
                 }
             };
-            if observation.observer != reality.observer.identity() {
+            if observation.observer != adapter.observer.identity() {
                 return Err(KernelError::RealityVerification(
                     "observer receipt identity differs from configured observer".into(),
                 ));
@@ -836,12 +1111,12 @@ impl<P: Provider> DurableExecutor<P> {
         };
         fault::trigger(FaultPoint::EffectAfterObservation, &request.operation_id);
 
-        reality
+        adapter
             .verifier
             .verify_evidence(&observation.evidence_refs)
             .await?;
 
-        let verifier = reality.verifier.identity();
+        let verifier = adapter.verifier.identity();
         if contract.verification == VerificationMode::Independent
             && (verifier.identity == receipt.provider_revision
                 || receipt.executor_identity.as_deref() == Some(verifier.identity.as_str()))
@@ -852,7 +1127,7 @@ impl<P: Provider> DurableExecutor<P> {
         }
         let verification = if let Some(verification) = self.received_verification(request)? {
             if verification.verifier != verifier
-                || verification.verification_policy_revision != reality.verifier.policy_revision()
+                || verification.verification_policy_revision != adapter.verifier.policy_revision()
             {
                 return Err(KernelError::RealityVerification(
                     "durable verifier identity or policy differs from configured verifier".into(),
@@ -863,7 +1138,7 @@ impl<P: Provider> DurableExecutor<P> {
                 .map_err(KernelError::RealityVerification)?;
             verification
         } else {
-            let decision = reality.verifier.evaluate(contract, &observation).await?;
+            let decision = adapter.verifier.evaluate(contract, &observation).await?;
             let verification = EffectVerification {
                 verification_id: uuid::Uuid::now_v7().to_string(),
                 effect_id: contract.effect_id.clone(),
@@ -875,7 +1150,7 @@ impl<P: Provider> DurableExecutor<P> {
                     .digest()
                     .map_err(KernelError::RealityVerification)?,
                 verifier: verifier.clone(),
-                verification_policy_revision: reality.verifier.policy_revision(),
+                verification_policy_revision: adapter.verifier.policy_revision(),
                 evidence_refs: decision.evidence_refs,
                 verified_at: chrono::Utc::now(),
             };
@@ -898,7 +1173,7 @@ impl<P: Provider> DurableExecutor<P> {
             )?;
             verification
         };
-        reality
+        adapter
             .verifier
             .verify_evidence(&verification.evidence_refs)
             .await?;
@@ -934,6 +1209,28 @@ impl<P: Provider> DurableExecutor<P> {
             }
         }
         Ok(pending.into_values().collect())
+    }
+
+    pub(crate) fn record_recovery_required(
+        &self,
+        request: &OperationRequest,
+        reason: &str,
+    ) -> Result<(), KernelError> {
+        self.append(
+            request,
+            EntryType::Transition,
+            "EffectState",
+            "RECOVERY_REQUIRED",
+            &serde_json::json!({
+                "operation_id": request.operation_id,
+                "effect_id": request.effect_contract.as_ref().map(|effect| &effect.effect_id),
+                "reason": reason,
+            }),
+            Some(format!(
+                "operation:{}:recovery-required",
+                request.operation_id
+            )),
+        )
     }
 
     #[cfg(test)]
@@ -1062,9 +1359,52 @@ pub fn digest_json<T: Serialize>(value: &T) -> Result<String, KernelError> {
     Ok(digest_bytes(&body))
 }
 
+fn verify_node_signature(
+    receipt: &RemoteExecutionReceipt,
+    public_key_hex: &str,
+) -> Result<(), KernelError> {
+    let public_key: [u8; 32] = decode_hex(public_key_hex)?
+        .try_into()
+        .map_err(|_| KernelError::RealityVerification("node public key must be 32 bytes".into()))?;
+    let signature: [u8; 64] = decode_hex(&receipt.signed_envelope.signature)?
+        .try_into()
+        .map_err(|_| KernelError::RealityVerification("node signature must be 64 bytes".into()))?;
+    let verifier = VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| KernelError::RealityVerification("node public key is invalid".into()))?;
+    verifier
+        .verify(
+            &receipt
+                .signed_envelope
+                .signing_bytes()
+                .map_err(KernelError::RealityVerification)?,
+            &Signature::from_bytes(&signature),
+        )
+        .map_err(|_| KernelError::RealityVerification("node signature is invalid".into()))
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, KernelError> {
+    if !value.len().is_multiple_of(2) {
+        return Err(KernelError::RealityVerification(
+            "hex value has an invalid length".into(),
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| {
+                KernelError::RealityVerification("hex value contains invalid UTF-8".into())
+            })?;
+            u8::from_str_radix(text, 16)
+                .map_err(|_| KernelError::RealityVerification("hex value is invalid".into()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nous_types::SignedNodeEnvelope;
 
     struct DigestProvider;
 
@@ -1077,6 +1417,84 @@ mod tests {
 
     struct TestVerifier {
         identity: String,
+    }
+
+    #[test]
+    fn verifies_python_node_protocol_ed25519_fixture() {
+        let envelope: SignedNodeEnvelope = serde_json::from_str(
+            r#"{"created_at":"2026-09-23T00:00:00Z","expires_at":"","idempotency_key":"operation-1","message_id":"message-fixture","message_type":"WORKLOAD_STATUS","payload":{"binding":{"intent_id":"operation-1"},"request_digest":"ab","state":"COMPLETED","workload_id":"operation-1"},"protocol":"nous-node","protocol_version":"1.0","reply_to":"dispatch-fixture","sequence":7,"signature":"17cf3591d2d721a09d871f97a8c1f6228f2dc804533972658ec73f74699bc0fa0300de4eea9bd2a2cc18dd692abec3f21c0ecfa76c37db133442ad27ae4d3e02","source":"node-fixture","target":"control_plane"}"#,
+        )
+        .unwrap();
+        let receipt = RemoteExecutionReceipt {
+            schema_version: 1,
+            operation_id: "operation-1".into(),
+            workload_id: "workload-1".into(),
+            node_id: "node-fixture".into(),
+            executor_id: "fixture".into(),
+            intent_id: "operation-1".into(),
+            effect_contract_digest: "0".repeat(64),
+            target_ref: "node://fixture/service".into(),
+            target_binding_digest: "1".repeat(64),
+            request_digest: "2".repeat(64),
+            output_digest: "3".repeat(64),
+            provider_revision: "fixture".into(),
+            delivery_semantics: DeliverySemantics::AtMostOnce,
+            started_at: "2026-09-23T00:00:00Z".into(),
+            completed_at: "2026-09-23T00:00:01Z".into(),
+            node_protocol_version: "1.0".into(),
+            signed_envelope_digest: envelope.digest().unwrap(),
+            signed_envelope: envelope,
+        };
+        verify_node_signature(
+            &receipt,
+            "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        )
+        .unwrap();
+        let mut tampered = receipt;
+        tampered.signed_envelope.payload["state"] = serde_json::json!("FAILED");
+        assert!(verify_node_signature(
+            &tampered,
+            "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn remote_provider_uncertainty_requires_manual_recovery() {
+        let response = ProviderResponse {
+            ok: false,
+            receipt: None,
+            probe: None,
+            error_code: "NOUS_NODE_UNCERTAIN_EFFECT".into(),
+            error_message: "outcome unknown".into(),
+        };
+        assert!(matches!(
+            provider_response_error(&response, "operation-1"),
+            KernelError::RecoveryRequired(operation) if operation == "operation-1"
+        ));
+    }
+
+    #[test]
+    fn remote_external_provider_requires_signed_receipt() {
+        let mut request = request();
+        request.execution_domain = ProviderRuntimeClass::Remote;
+        request.backend = "external-process".into();
+        let command = ProviderCommand::Execute {
+            request: Box::new(request.clone()),
+        };
+        assert_eq!(
+            external_provider_request(&command).unwrap()["schema_version"],
+            serde_json::json!(2)
+        );
+        let response = serde_json::to_vec(&serde_json::json!({
+            "ok": true,
+            "output": "{}",
+        }))
+        .unwrap();
+        assert!(normalize_external_provider_response(&command, &response)
+            .unwrap_err()
+            .to_string()
+            .contains("no signed execution receipt"));
     }
 
     #[async_trait]
@@ -1176,6 +1594,7 @@ mod tests {
                 snapshot_digest: digest_json(&request.snapshot)?,
                 provider_revision: request.snapshot.provider_revision.clone(),
                 executor_identity: None,
+                remote_execution: None,
                 result: request.input.clone(),
                 completed_at_us: chrono::Utc::now().timestamp_micros(),
             })
@@ -1302,6 +1721,7 @@ mod tests {
             snapshot_digest: digest_json(&request.snapshot).unwrap(),
             provider_revision: request.snapshot.provider_revision.clone(),
             executor_identity: None,
+            remote_execution: None,
             result: "durable-result".into(),
             completed_at_us: 1,
         };
@@ -1388,6 +1808,7 @@ mod tests {
             snapshot_digest: digest_json(&request.snapshot).unwrap(),
             provider_revision: request.snapshot.provider_revision.clone(),
             executor_identity: Some(std::any::type_name::<DigestProvider>().into()),
+            remote_execution: None,
             result: "provider-success".into(),
             completed_at_us: 1,
         };

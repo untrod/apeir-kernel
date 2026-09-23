@@ -1,8 +1,8 @@
 use crate::{
     assess_compatibility, BootCore, CancellationToken, CompatibilityReport, ContinuityExecution,
     ContinuityPlan, DurableExecutor, FailoverRecord, KernelError, KernelState, ModelCompatibility,
-    OperationReceipt, OperationRequest, Provider, ProviderProbeReport, ProviderProbeRequest,
-    RealityObserver, RealityVerifier,
+    NodeTrustResolver, OperationReceipt, OperationRequest, Provider, ProviderProbeReport,
+    ProviderProbeRequest, RealityAdapterRegistry, RealityObserver, RealityVerifier,
 };
 use nous_resource::admission::{AdmissionController, AdmissionDecision};
 use nous_resource::{FencedLease, LeaseManager};
@@ -72,8 +72,25 @@ impl<P: Provider> KernelRuntime<P> {
         observer: Arc<dyn RealityObserver>,
         verifier: Arc<dyn RealityVerifier>,
     ) -> Self {
-        self.executor.configure_reality(observer, verifier);
+        self.executor.configure_reality_registry(
+            Arc::new(crate::FixedRealityRegistry { observer, verifier }),
+            None,
+        );
         self
+    }
+
+    pub fn with_reality_registry(
+        mut self,
+        registry: Arc<dyn RealityAdapterRegistry>,
+        node_trust: Option<Arc<dyn NodeTrustResolver>>,
+    ) -> Self {
+        self.executor
+            .configure_reality_registry(registry, node_trust);
+        self
+    }
+
+    pub fn reality_adapters(&self) -> Vec<crate::RealityAdapterDescriptor> {
+        self.executor.reality_descriptors()
     }
 
     pub async fn execute(
@@ -587,7 +604,12 @@ impl<P: Provider> KernelRuntime<P> {
                 nous_types::RecoveryStrategy::Replay => {
                     recovered.push(self.execute_internal(&request, true).await?);
                 }
-                _ => return Err(KernelError::UnsafeRecovery(request.operation_id)),
+                _ => {
+                    self.executor.record_recovery_required(
+                        &request,
+                        "no durable receipt exists and delivery semantics forbid replay",
+                    )?;
+                }
             }
         }
         Ok(recovered)
@@ -964,6 +986,7 @@ mod tests {
                 snapshot_digest: crate::digest_json(&request.snapshot)?,
                 provider_revision: request.snapshot.provider_revision.clone(),
                 executor_identity: None,
+                remote_execution: None,
                 result: request.backend.clone(),
                 completed_at_us: chrono::Utc::now().timestamp_micros(),
             })

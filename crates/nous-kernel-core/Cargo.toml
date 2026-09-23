@@ -21,6 +21,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

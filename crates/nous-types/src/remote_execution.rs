@@ -3,12 +3,11 @@
 use crate::{DeliverySemantics, EffectContract, OperationRequest, TargetBinding};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 pub const REMOTE_EXECUTION_RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const NODE_PROTOCOL_V1: &str = "1.0";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedNodeEnvelope {
     pub created_at: String,
@@ -45,18 +44,17 @@ impl SignedNodeEnvelope {
     }
 
     pub fn signing_bytes(&self) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(&self.unsigned_value()).map_err(|error| error.to_string())
+        crate::effect::canonical_json_bytes(&self.unsigned_value())
     }
 
     pub fn digest(&self) -> Result<String, String> {
-        let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
-        Ok(hex_digest(&bytes))
+        crate::effect::canonical_digest(self)
     }
 }
 
 /// Candidate remote execution fact. It becomes Kernel truth only after
 /// signature, trust, intent, effect, target, and digest admission.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteExecutionReceipt {
     pub schema_version: u32,
@@ -115,11 +113,42 @@ impl RemoteExecutionReceipt {
             .payload
             .as_object()
             .ok_or_else(|| "remote execution envelope payload must be an object".to_string())?;
-        if payload.get("workload_id").and_then(Value::as_str) != Some(self.operation_id.as_str())
-            || payload.get("request_digest").and_then(Value::as_str)
-                != Some(self.request_digest.as_str())
-        {
+        if payload.get("workload_id").and_then(Value::as_str) != Some(self.operation_id.as_str()) {
             return Err("signed node payload does not bind the remote receipt".into());
+        }
+        if payload.get("state").and_then(Value::as_str) != Some("COMPLETED") {
+            return Err("signed node payload is not a completed execution fact".into());
+        }
+        let binding = payload
+            .get("binding")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "signed node payload has no effect binding".to_string())?;
+        let node_receipt = payload
+            .get("receipt")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "signed node payload has no operation receipt".to_string())?;
+        if binding.get("intent_id").and_then(Value::as_str) != Some(self.intent_id.as_str())
+            || binding
+                .get("effect_contract_digest")
+                .and_then(Value::as_str)
+                != Some(self.effect_contract_digest.as_str())
+            || binding.get("target_ref").and_then(Value::as_str) != Some(self.target_ref.as_str())
+            || binding.get("target_binding_digest").and_then(Value::as_str)
+                != Some(self.target_binding_digest.as_str())
+            || binding.get("workload_id").and_then(Value::as_str) != Some(self.workload_id.as_str())
+            || binding.get("request_digest").and_then(Value::as_str)
+                != Some(self.request_digest.as_str())
+            || binding.get("provider_revision").and_then(Value::as_str)
+                != Some(self.provider_revision.as_str())
+            || node_receipt.get("operation_id").and_then(Value::as_str)
+                != Some(self.operation_id.as_str())
+            || node_receipt.get("node_id").and_then(Value::as_str) != Some(self.node_id.as_str())
+            || node_receipt.get("executor").and_then(Value::as_str)
+                != Some(self.executor_id.as_str())
+            || node_receipt.get("effect_digest").and_then(Value::as_str)
+                != Some(self.output_digest.as_str())
+        {
+            return Err("signed node receipt fields do not match remote receipt".into());
         }
         if self.executor_id.is_empty()
             || self.output_digest.len() != 64
@@ -130,13 +159,6 @@ impl RemoteExecutionReceipt {
         }
         Ok(())
     }
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -209,10 +231,27 @@ mod tests {
         contract: &EffectContract,
         target: &TargetBinding,
     ) -> RemoteExecutionReceipt {
+        let output_digest = "1".repeat(64);
         let payload = serde_json::json!({
             "workload_id": request.operation_id,
             "request_digest": request.input_digest(),
-            "state": "COMPLETED"
+            "state": "COMPLETED",
+            "binding": {
+                "intent_id": request.operation_id,
+                "effect_contract_digest": contract.digest().unwrap(),
+                "target_ref": target.target_ref,
+                "target_binding_digest": target.digest().unwrap(),
+                "workload_id": request.workload_id,
+                "request_digest": request.input_digest(),
+                "provider_revision": request.snapshot.provider_revision,
+            },
+            "receipt": {
+                "operation_id": request.operation_id,
+                "node_id": target.node_id,
+                "executor": "nous-node/bounded-handler",
+                "request_digest": request.input_digest(),
+                "effect_digest": output_digest,
+            }
         });
         let envelope = SignedNodeEnvelope {
             created_at: "2026-09-23T00:00:00Z".into(),
@@ -240,7 +279,7 @@ mod tests {
             target_ref: target.target_ref.clone(),
             target_binding_digest: target.digest().unwrap(),
             request_digest: request.input_digest(),
-            output_digest: "1".repeat(64),
+            output_digest,
             provider_revision: request.snapshot.provider_revision.clone(),
             delivery_semantics: request.delivery,
             started_at: "2026-09-23T00:00:00Z".into(),
@@ -255,7 +294,14 @@ mod tests {
     fn target_binding_is_canonical_and_governs_contract() {
         let target = target();
         target.admits(&contract()).unwrap();
-        assert_eq!(target.digest().unwrap().len(), 64);
+        assert_eq!(
+            target.digest().unwrap(),
+            "2dcedb460f2f71ee32f2c8c49061d57f5d0c4c5f201b17edc3321f4e357f40b3"
+        );
+        assert_eq!(
+            contract().digest().unwrap(),
+            "a1dba61f6b64a4d503e24c4f4c450edea15c4980b8470f163aa11385a287c6aa"
+        );
         let mut changed = target.clone();
         changed.revision = "target-2".into();
         assert_ne!(target.digest().unwrap(), changed.digest().unwrap());
