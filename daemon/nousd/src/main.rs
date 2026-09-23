@@ -1110,3 +1110,97 @@ fn control_error(error: ControlPlaneError) -> NKIOutcome {
     };
     nki_error(code, error.to_string(), false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nous_types::ProviderRuntimeClass;
+
+    #[test]
+    fn execution_projection_contains_only_durable_stages() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = Arc::new(BootCore::open(directory.path().join("journal.db")).unwrap());
+        let runtime = KernelRuntime::new(core.clone(), ProcessProvider::new("unused-worker"));
+        let request = OperationRequest {
+            operation_id: "projection-operation".into(),
+            workload_id: "projection-workload".into(),
+            step_id: "projection-step".into(),
+            backend: "external-process".into(),
+            execution_domain: ProviderRuntimeClass::Remote,
+            model: "service.mutate".into(),
+            endpoint: String::new(),
+            credential_env: String::new(),
+            provider_entrypoint: "apeir-remote-provider".into(),
+            input: "{}".into(),
+            delivery: DeliverySemantics::AtMostOnce,
+            snapshot: SemanticExecutionSnapshot {
+                model_revision: "model-1".into(),
+                provider_revision: "provider-1".into(),
+                prompt_revision: "prompt-1".into(),
+                tool_revision: "tool-1".into(),
+                knowledge_revision: "knowledge-1".into(),
+                policy_revision: "policy-1".into(),
+                capability_revision: "capability-1".into(),
+                context_revision: "context-1".into(),
+            },
+            timeout_ms: 1_000,
+            effect_contract: None,
+        };
+        core.journal
+            .append(JournalEntry {
+                sequence: 0,
+                workload_id: request.workload_id.clone(),
+                entry_type: EntryType::Intent,
+                object_type: "Operation".into(),
+                object_id: request.operation_id.clone(),
+                previous_phase: None,
+                new_phase: "PENDING".into(),
+                generation: 1,
+                payload: serde_json::to_vec(&request).unwrap(),
+                fencing_token: request.operation_id.clone(),
+                actor: "test".into(),
+                idempotency_key: Some("projection:intent".into()),
+                timestamp_us: 0,
+                checksum: Vec::new(),
+            })
+            .unwrap();
+        core.journal
+            .append(JournalEntry {
+                sequence: 0,
+                workload_id: request.workload_id.clone(),
+                entry_type: EntryType::Transition,
+                object_type: "EffectState".into(),
+                object_id: request.operation_id.clone(),
+                previous_phase: None,
+                new_phase: "RECOVERY_REQUIRED".into(),
+                generation: 1,
+                payload: serde_json::to_vec(&serde_json::json!({
+                    "operation_id": &request.operation_id,
+                    "reason": "outcome unknown",
+                }))
+                .unwrap(),
+                fencing_token: request.operation_id.clone(),
+                actor: "test".into(),
+                idempotency_key: Some("projection:recovery".into()),
+                timestamp_us: 0,
+                checksum: Vec::new(),
+            })
+            .unwrap();
+
+        let projection = execution_projection(
+            &core,
+            &runtime,
+            &serde_json::json!({"operation_id": "projection-operation"}),
+        )
+        .unwrap();
+        assert_eq!(
+            projection["execution_path"],
+            serde_json::json!(["NKI", "durable_intent"])
+        );
+        assert_eq!(
+            projection["recovery_state"],
+            serde_json::json!("RECOVERY_REQUIRED")
+        );
+        assert_eq!(projection["facts"].as_array().unwrap().len(), 2);
+    }
+}
