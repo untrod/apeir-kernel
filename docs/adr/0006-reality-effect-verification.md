@@ -1,6 +1,7 @@
 # ADR 0006: Reality effect verification
 
-Status: Implemented on feature/reality-execution-v2
+Status: Production-boundary implementation on `feature/reality-execution-v2`;
+cross-machine acceptance pending
 
 ## Decision
 
@@ -10,66 +11,106 @@ operation carrying an `EffectContract` therefore follows one authoritative
 path:
 
 ```text
-intent -> authority -> execute -> OperationReceipt
+intent -> target binding -> execute -> OperationReceipt
        -> ObservedEffect -> EffectVerification -> StepCommit
 ```
 
-`ObservedEffect` is produced by an explicitly configured observer with an
-identity and capability. It binds a typed observed value to content-addressed
-evidence. `EffectVerification` binds the exact contract digest and observation
-digest to a verifier identity and policy revision. Only `MATCH` permits commit.
-`PARTIAL`, `MISMATCH`, and `UNKNOWN` fail closed.
+`ObservedEffect` binds a typed value to immutable Artifact references.
+`EffectVerification` binds the exact contract and observation digests to a
+verifier identity and policy revision. Only `MATCH` permits commit. `PARTIAL`,
+`MISMATCH`, and `UNKNOWN` fail closed.
 
-For `INDEPENDENT` verification, the provider executor identity cannot equal the
-verifier identity. Kernel assigns the executor identity to effectful
-`OperationReceipt`; the provider cannot self-assert it. Models may diagnose or propose action, but cannot issue a
-Reality Verification receipt merely by claiming success. Deterministic probes
-or an explicitly governed human verifier must cross this boundary.
+For `INDEPENDENT` verification, neither the Kernel-owned provider executor nor
+the executor bound into an admitted remote receipt may equal the verifier.
+Kernel assigns the local executor identity. A remote Node supplies a signed
+candidate fact which Kernel independently checks against its trust resolver,
+Intent, EffectContract, TargetBinding, request digest, delivery semantics, and
+protocol version. A Node cannot create Kernel truth directly.
 
-The daemon's first adapter is an explicit, single-service reference configuration
-passed as `REALITY_SERVICE_CONFIG` to `serve`. It admits only its configured
-target/subject and `apeir.service-health/v1`, probes a numeric loopback socket,
-stores bounded content-addressed response evidence beside the Journal, and
-reconstructs the observed HTTP status and version from those bytes before
-declaring `MATCH`. Without the configuration, a contracted NKI request fails
-before provider execution. This is not a general observer registry or the
-Distribution Artifact Runtime integration.
+The daemon loads a governed adapter registry from the optional reality config
+passed to `serve`. The first and only adapter family is
+`apeir.http-service/v1`. Each entry binds a logical target reference to one
+versioned `TargetBinding`; NKI callers never supply its endpoint. The adapter
+admits only its configured target/subject and `apeir.service-health/v1`, and
+retains the numeric-loopback probe restriction. Registry lookup discovers a
+compatible mechanism; it does not grant authority.
 
-Reference configuration example (admin-supplied file, not an NKI payload):
+Observation bytes are written first through the Distribution
+`ContentAddressedArtifactStore` bridge. Only the returned `EvidenceRef` is then
+journaled in `ObservedEffect`. The verifier resolves and digest-checks those
+bytes through the same bridge and independently reconstructs HTTP status and
+service version. A missing or modified Artifact prevents commit. An orphan
+Artifact created before `ObservedEffect` is safe to garbage-collect; a Journal
+reference to missing bytes is data loss and fails closed.
+
+Reference configuration (administrator supplied, never an NKI payload):
 
 ```json
 {
-  "schema_version": 1,
-  "target": "service:test",
-  "subject": "service:test",
-  "service_address": "127.0.0.1:8080"
+  "schema_version": 2,
+  "artifact_bridge": {
+    "program": "C:/path/to/distribution/python.exe",
+    "root": "C:/apeir/artifacts"
+  },
+  "trusted_nodes_path": "C:/apeir/relay/trusted-nodes.json",
+  "targets": [{
+    "subject": "service:test-api",
+    "target_binding": {
+      "schema_version": 1,
+      "target_ref": "node://arm64-lab/service/test-api",
+      "target_kind": "http-service",
+      "node_id": "node-arm64",
+      "adapter_id": "apeir.http-service/v1",
+      "adapter_revision": "1",
+      "endpoint_binding": {"address": "127.0.0.1:8080"},
+      "allowed_effect_schemas": ["apeir.service-health/v1"],
+      "revision": "target-1"
+    }
+  }]
 }
 ```
 
-Start with `apeird serve JOURNAL WORKER 127.0.0.1:8771 CONFIG.json`. The
-evidence directory is derived from the Journal path (`.evidence`) and is never
-client-controlled. The adapter is deliberately limited to this local service
-probe; it does not authorize remote endpoints or arbitrary scripts.
+Start with `apeird serve JOURNAL WORKER 127.0.0.1:8771 CONFIG.json`. The bridge
+program must be a Python runtime containing the installed Distribution package.
+Daemon startup checks bridge health before advertising `artifact.evidence` or
+Reality capabilities.
+
+Remote execution uses the external provider boundary and Distribution's
+`apeir-remote-provider` entry point. Its durable spool feeds the existing Relay
+and Node Protocol rather than defining another wire protocol. The signed Node
+envelope is projected into `RemoteExecutionReceipt`, then admitted by Kernel as
+an `OperationReceipt` fact. `NOUS_NODE_UNCERTAIN_EFFECT` becomes the journaled
+state `RECOVERY_REQUIRED`, never ordinary failure or automatic replay.
 
 ## Crash and recovery
 
-- Durable intent without a receipt is replayed only when the shared
-  `DeliverySemantics` recovery matrix returns `Replay` (`IDEMPOTENT`).
-- A durable `OperationReceipt` without verification resumes observation and
-  verification and never invokes the provider again.
+- Durable intent without a receipt is replayed only when `DeliverySemantics`
+  returns `Replay` (`IDEMPOTENT`).
+- A durable `OperationReceipt` resumes observation and verification without
+  invoking the provider again.
 - A durable `MATCH` awaiting commit commits the existing verified result.
-- `MISMATCH` never becomes success. `UNKNOWN` is fail-closed.
-- `AT_MOST_ONCE`, `UNKNOWN`, compensatable, external-commit, at-least-once, and
-  merely reconcilable uncertain executions are not blindly replayed.
+- Unsafe pending outcomes are recorded as `RECOVERY_REQUIRED` and not replayed.
+- `MISMATCH`, `UNKNOWN`, missing evidence, and digest mismatch never commit.
 
-Compensation is a new effect and requires a new intent, admission, authority,
-receipt, observation, and verification.
+Compensation is a new effect and requires a new intent, admission, receipt,
+observation, and verification.
 
-## Compatibility
+## Compatibility and authority
 
-`OperationRequest.effect_contract` is optional and omitted on the wire for
-legacy requests. NKI protocol versions 1 and 2 remain accepted for requests
-without a contract. Contracted requests require NKI version 3 so an older
-daemon rejects them rather than silently ignoring the contract. Existing enum
-identities and journal format are not renumbered. New facts are appended as new
-object types.
+`OperationRequest.effect_contract` remains optional. NKI v1/v2 accept requests
+without a contract; effectful requests require NKI v3. Existing enum identities
+and Journal format are not renumbered; new facts use new object types.
+
+The in-memory `TransactionalEffectEngine` is a domain/test reference. It is not
+the production durability authority and does not own remote receipts, Artifact
+persistence, daemon recovery, or commit. Production truth is
+`DurableExecutor + Journal`.
+
+## Acceptance status
+
+Contract round trips, cross-language canonical digests, Node signature fixtures,
+Registry/Target admission, Artifact PUT/GET and tamper rejection, receipt
+recovery, and fail-closed provider behavior are locally testable. The x64
+Controller to ARM64 Node real-effect experiment, independent remote observation,
+reconnect/fault matrix, and final cross-platform acceptance remain pending.
+Their absence must not be reported as a pass or as M2 completion.
