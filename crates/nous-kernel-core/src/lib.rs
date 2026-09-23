@@ -351,6 +351,12 @@ impl ProcessProvider {
         cancellation: CancellationToken,
         operation_id: &str,
     ) -> Result<ProviderResponse, KernelError> {
+        let uncertain_remote_effect = matches!(
+            &command_body,
+            ProviderCommand::Execute { request }
+                if request.execution_domain == ProviderRuntimeClass::Remote
+                    && request.effect_contract.is_some()
+        );
         let external_entrypoint = match &command_body {
             ProviderCommand::Execute { request } if request.backend == "external-process" => {
                 Some(request.provider_entrypoint.as_str())
@@ -448,12 +454,20 @@ impl ProcessProvider {
             _ = cancellation.cancelled() => {
                 wait_task.abort();
                 let _ = wait_task.await;
-                return Err(KernelError::Cancelled(operation_id.into()));
+                return Err(if uncertain_remote_effect {
+                    KernelError::RecoveryRequired(operation_id.into())
+                } else {
+                    KernelError::Cancelled(operation_id.into())
+                });
             }
             _ = tokio::time::sleep(timeout) => {
                 wait_task.abort();
                 let _ = wait_task.await;
-                return Err(KernelError::DeadlineExceeded(operation_id.into()));
+                return Err(if uncertain_remote_effect {
+                    KernelError::RecoveryRequired(operation_id.into())
+                } else {
+                    KernelError::DeadlineExceeded(operation_id.into())
+                });
             }
         };
         let response = if external_entrypoint.is_some() {

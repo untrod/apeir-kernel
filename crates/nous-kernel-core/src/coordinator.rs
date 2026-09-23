@@ -245,44 +245,47 @@ impl<P: Provider> KernelRuntime<P> {
             }
         }
         if let Err(error) = &execution {
-            if let Err(error) = self.executor.append(
-                request,
-                EntryType::Abort,
-                "Operation",
-                error.code(),
-                &serde_json::json!({
-                    "code": error.code(),
-                    "category": error.category(),
-                    "retryable": error.retryable(),
-                    "source": error.source_component(),
-                }),
-                Some(format!(
-                    "operation:{}:abort:{}",
-                    request.operation_id, request.snapshot.provider_revision
-                )),
-            ) {
-                bookkeeping_error = Some(error);
-            }
-            if let Err(error) = self.executor.append(
-                request,
-                EntryType::Observation,
-                "OperationFailure",
-                error.code(),
-                &serde_json::json!({
-                    "code": error.code(),
-                    "category": error.category(),
-                    "retryable": error.retryable(),
-                    "source": error.source_component(),
-                }),
-                Some(format!("operation:{}:failure", request.operation_id)),
-            ) {
-                bookkeeping_error = Some(error);
+            if !matches!(error, KernelError::RecoveryRequired(_)) {
+                if let Err(error) = self.executor.append(
+                    request,
+                    EntryType::Abort,
+                    "Operation",
+                    error.code(),
+                    &serde_json::json!({
+                        "code": error.code(),
+                        "category": error.category(),
+                        "retryable": error.retryable(),
+                        "source": error.source_component(),
+                    }),
+                    Some(format!(
+                        "operation:{}:abort:{}",
+                        request.operation_id, request.snapshot.provider_revision
+                    )),
+                ) {
+                    bookkeeping_error = Some(error);
+                }
+                if let Err(error) = self.executor.append(
+                    request,
+                    EntryType::Observation,
+                    "OperationFailure",
+                    error.code(),
+                    &serde_json::json!({
+                        "code": error.code(),
+                        "category": error.category(),
+                        "retryable": error.retryable(),
+                        "source": error.source_component(),
+                    }),
+                    Some(format!("operation:{}:failure", request.operation_id)),
+                ) {
+                    bookkeeping_error = Some(error);
+                }
             }
         }
 
         let (entry_type, phase) = match &execution {
             Ok(_) => (EntryType::Commit, "COMPLETED"),
             Err(KernelError::Cancelled(_)) => (EntryType::Commit, "CANCELLED"),
+            Err(KernelError::RecoveryRequired(_)) => (EntryType::Transition, "RECOVERY_REQUIRED"),
             Err(_) => (EntryType::Transition, "FAILED"),
         };
         if let Err(error) = self.executor.append(
@@ -1124,6 +1127,8 @@ mod tests {
 
     struct FailingProvider;
 
+    struct UncertainProvider;
+
     #[async_trait]
     impl Provider for FailingProvider {
         async fn execute(
@@ -1132,6 +1137,17 @@ mod tests {
             _cancellation: CancellationToken,
         ) -> Result<OperationReceipt, KernelError> {
             Err(KernelError::Provider("observed failure".into()))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for UncertainProvider {
+        async fn execute(
+            &self,
+            request: &OperationRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<OperationReceipt, KernelError> {
+            Err(KernelError::RecoveryRequired(request.operation_id.clone()))
         }
     }
 
@@ -1160,6 +1176,34 @@ mod tests {
         }
         let core = Arc::new(BootCore::open(&path).unwrap());
         let runtime = KernelRuntime::new(core, PanicProvider);
+        assert!(runtime.recover().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uncertain_effect_remains_pending_without_abort_or_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = Arc::new(BootCore::open(directory.path().join("journal.db")).unwrap());
+        let runtime = KernelRuntime::new(core.clone(), UncertainProvider);
+        let mut uncertain = request();
+        uncertain.delivery = DeliverySemantics::AtMostOnce;
+        assert!(matches!(
+            runtime.execute(&uncertain).await,
+            Err(KernelError::RecoveryRequired(_))
+        ));
+        let entries = core.journal.read_workload(&uncertain.workload_id).unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry.object_type == "EffectState" && entry.new_phase == "RECOVERY_REQUIRED"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.object_type == "Workload" && entry.new_phase == "RECOVERY_REQUIRED"
+        }));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.entry_type == EntryType::Abort));
+        assert_eq!(
+            runtime.executor.pending_operations().unwrap(),
+            vec![uncertain]
+        );
         assert!(runtime.recover().await.unwrap().is_empty());
     }
 
