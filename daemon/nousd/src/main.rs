@@ -108,15 +108,16 @@ async fn serve(
     }
     let session_token = Arc::new(session_token);
     let control_path = journal.with_extension("control.db");
-    let reality = reality_config
-        .as_deref()
-        .map(|path| reality_service::load(path, &journal))
-        .transpose()?;
+    let reality = if let Some(path) = reality_config.as_deref() {
+        Some(reality_service::load(path, &journal).await?)
+    } else {
+        None
+    };
     let core = Arc::new(BootCore::open(journal)?);
     let control = Arc::new(ControlPlaneStore::open(control_path)?);
     let mut runtime = KernelRuntime::new(core.clone(), ProcessProvider::new(worker));
-    if let Some((observer, verifier)) = reality {
-        runtime = runtime.with_reality_verification(observer, verifier);
+    if let Some(reality) = reality {
+        runtime = runtime.with_reality_registry(reality.registry, reality.node_trust);
     }
     let runtime = Arc::new(runtime);
     runtime.recover().await?;
@@ -235,8 +236,30 @@ async fn dispatch_request(
     control: &ControlPlaneStore,
 ) -> Result<NKIOutcome, Box<dyn std::error::Error>> {
     Ok(match request.method.as_str() {
-        NKIMethods::HEALTH_CHECK => NKIOutcome::Success {
-            payload: serde_json::json!({
+        NKIMethods::HEALTH_CHECK => {
+            let adapters = runtime.reality_adapters();
+            let mut capabilities = vec![
+                "nki.v1".to_string(),
+                "nki.v2".to_string(),
+                "nki.v3".to_string(),
+                "provider.process".to_string(),
+                "provider.external-process".to_string(),
+                "durable.execution".to_string(),
+                "mathematics.evaluate".to_string(),
+                "fenced.lease".to_string(),
+            ];
+            if !adapters.is_empty() {
+                capabilities.push("reality.effect".into());
+                capabilities.push("artifact.evidence".into());
+                for adapter in &adapters {
+                    capabilities.push(format!("reality.observe.{}", adapter.effect_schema));
+                    capabilities.push(format!("reality.verify.{}", adapter.effect_schema));
+                }
+                capabilities.sort();
+                capabilities.dedup();
+            }
+            NKIOutcome::Success {
+                payload: serde_json::json!({
                 "state": core.state(),
                 "runtime_version": env!("CARGO_PKG_VERSION"),
                 "contracts": {
@@ -249,17 +272,12 @@ async fn dispatch_request(
                     "identity": "local-kernel",
                     "connection": "CONNECTED",
                     "heartbeat_us": chrono::Utc::now().timestamp_micros(),
-                    "capabilities": [
-                        "nki.v2",
-                        "provider.process",
-                        "provider.external-process",
-                        "durable.execution",
-                        "mathematics.evaluate",
-                        "fenced.lease"
-                    ],
+                    "capabilities": capabilities,
+                    "reality_adapters": adapters,
                 },
-            }),
-        },
+                }),
+            }
+        }
         NKIMethods::SUBMIT_WORKLOAD => {
             match serde_json::from_slice::<OperationRequest>(&request.payload) {
                 Ok(mut operation) => {
@@ -901,21 +919,8 @@ async fn dispatch_request(
         }
         NKIMethods::EXPLAIN_EXECUTION => {
             let payload: serde_json::Value = serde_json::from_slice(&request.payload)?;
-            let requested_workload = payload
-                .get("workload_id")
-                .and_then(serde_json::Value::as_str);
-            let decision_trace = match requested_workload {
-                Some(workload_id) => runtime.latest_decision_trace_for_workload(workload_id)?,
-                None => runtime.latest_decision_trace_any()?,
-            };
             NKIOutcome::Success {
-                payload: serde_json::json!({
-                    "execution_path": ["NKI", "durable_intent", "provider_process", "receipt", "step_commit"],
-                    "workload_id": requested_workload,
-                    "decision_trace": decision_trace,
-                    "recovery": "Committed receipts are replayed; only idempotent or reconcilable pending operations are retried.",
-                    "journal_sequence": core.journal.current_sequence()?,
-                }),
+                payload: execution_projection(core, runtime, &payload)?,
             }
         }
         NKIMethods::CANCEL_WORKLOAD => {
@@ -943,6 +948,131 @@ async fn dispatch_request(
         }
         _ => nki_error("METHOD_NOT_SUPPORTED", request.method.clone(), false),
     })
+}
+
+fn execution_projection(
+    core: &BootCore,
+    runtime: &KernelRuntime<ProcessProvider>,
+    selector: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let operation_id = selector
+        .get("operation_id")
+        .and_then(serde_json::Value::as_str);
+    let workload_id = selector
+        .get("workload_id")
+        .and_then(serde_json::Value::as_str);
+    let entries = core.journal.read_from(0)?;
+    let selected = entries
+        .into_iter()
+        .filter(|entry| {
+            operation_id.is_some_and(|value| entry.object_id == value)
+                || workload_id.is_some_and(|value| entry.workload_id == value)
+        })
+        .collect::<Vec<_>>();
+    let mut path = vec!["NKI".to_string()];
+    let mut facts = Vec::new();
+    let mut recovery_state = "NOT_STARTED".to_string();
+    for entry in selected {
+        let payload = serde_json::from_slice::<serde_json::Value>(&entry.payload)
+            .unwrap_or_else(|_| serde_json::json!({"unavailable": true}));
+        let projected = match entry.object_type.as_str() {
+            "Operation" => serde_json::from_value::<OperationRequest>(payload)
+                .map(|request| {
+                    serde_json::json!({
+                        "operation_id": request.operation_id,
+                        "workload_id": request.workload_id,
+                        "backend": request.backend,
+                        "delivery_semantics": request.delivery,
+                        "input_digest": request.input_digest(),
+                        "effect_contract": request.effect_contract,
+                    })
+                })
+                .unwrap_or_else(|_| serde_json::json!({"unavailable": true})),
+            "OperationReceipt" | "StepCommit" => {
+                serde_json::from_value::<nous_kernel_core::OperationReceipt>(payload)
+                    .map(|receipt| {
+                        serde_json::json!({
+                            "operation_id": receipt.operation_id,
+                            "input_digest": receipt.input_digest,
+                            "output_digest": receipt.output_digest,
+                            "snapshot_digest": receipt.snapshot_digest,
+                            "provider_revision": receipt.provider_revision,
+                            "executor_identity": receipt.executor_identity,
+                            "remote_execution": receipt.remote_execution,
+                            "completed_at_us": receipt.completed_at_us,
+                        })
+                    })
+                    .unwrap_or_else(|_| serde_json::json!({"unavailable": true}))
+            }
+            "TargetBinding" => serde_json::from_value::<nous_types::TargetBinding>(payload)
+                .map(|binding| {
+                    serde_json::json!({
+                        "target_ref": binding.target_ref,
+                        "target_kind": binding.target_kind,
+                        "node_id": binding.node_id,
+                        "adapter_id": binding.adapter_id,
+                        "adapter_revision": binding.adapter_revision,
+                        "revision": binding.revision,
+                        "digest": binding.digest().ok(),
+                    })
+                })
+                .unwrap_or_else(|_| serde_json::json!({"unavailable": true})),
+            _ => payload,
+        };
+        match (entry.object_type.as_str(), entry.new_phase.as_str()) {
+            ("Operation", _) => push_stage(&mut path, "durable_intent"),
+            ("TargetBinding", _) => push_stage(&mut path, "target_binding"),
+            ("EffectState", "EXECUTION_DISPATCHED") => push_stage(&mut path, "provider"),
+            ("OperationReceipt", _) => push_stage(&mut path, "receipt"),
+            ("ObservedEffect", _) => {
+                push_stage(&mut path, "observation");
+                push_stage(&mut path, "evidence");
+            }
+            ("EffectVerification", _) => push_stage(&mut path, "verification"),
+            ("StepCommit", _) => push_stage(&mut path, "step_commit"),
+            _ => {}
+        }
+        if entry.new_phase == "RECOVERY_REQUIRED" {
+            recovery_state = "RECOVERY_REQUIRED".into();
+        } else if entry.object_type == "StepCommit" {
+            recovery_state = "COMMITTED".into();
+        } else if entry.object_type == "EffectVerification" {
+            recovery_state = entry.new_phase.clone();
+        } else if entry.object_type == "ObservedEffect" {
+            recovery_state = "OBSERVED".into();
+        } else if entry.object_type == "OperationReceipt" {
+            recovery_state = "EXECUTED".into();
+        } else if entry.object_type == "Operation" {
+            recovery_state = "INTENT_ACCEPTED".into();
+        }
+        facts.push(serde_json::json!({
+            "sequence": entry.sequence,
+            "object_type": entry.object_type,
+            "object_id": entry.object_id,
+            "phase": entry.new_phase,
+            "timestamp_us": entry.timestamp_us,
+            "fact": projected,
+        }));
+    }
+    let decision_trace = match workload_id {
+        Some(workload_id) => runtime.latest_decision_trace_for_workload(workload_id)?,
+        None => runtime.latest_decision_trace_any()?,
+    };
+    Ok(serde_json::json!({
+        "operation_id": operation_id,
+        "workload_id": workload_id,
+        "execution_path": path,
+        "facts": facts,
+        "recovery_state": recovery_state,
+        "decision_trace": decision_trace,
+        "journal_sequence": core.journal.current_sequence()?,
+    }))
+}
+
+fn push_stage(path: &mut Vec<String>, stage: &str) {
+    if path.last().is_none_or(|existing| existing != stage) {
+        path.push(stage.into());
+    }
 }
 
 fn nki_error(code: &str, message: String, retryable: bool) -> NKIOutcome {
